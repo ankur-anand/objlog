@@ -3,7 +3,7 @@ package main
 import (
 	"log"
 
-	"github.com/ankur-anand/melee/internal/server"
+	"github.com/ankur-anand/meleelog/internal/server"
 )
 
 func main() {

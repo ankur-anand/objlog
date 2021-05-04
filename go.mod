@@ -1,4 +1,4 @@
-module github.com/ankur-anand/melee
+module github.com/ankur-anand/meleelog
 
 go 1.16
 
