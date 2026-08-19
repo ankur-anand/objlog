@@ -9,7 +9,6 @@ import (
 
 	"github.com/ankur-anand/unijord/partitionlog/catalog"
 	"github.com/ankur-anand/unijord/partitionlog/pmeta"
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
 	"github.com/ankur-anand/unijord/partitionlog/segreader"
 )
 
@@ -28,7 +27,7 @@ func New(cat catalog.Reader, store SegmentStore, opts Options) (*Reader, error) 
 		catalog: cat,
 		store:   store,
 		opts:    normalized,
-		refresh: newRefreshCoordinator(cat, normalized.Refresh, normalized.Observer),
+		refresh: newRefreshCoordinator(cat, normalized.Refresh, normalized.MaxCachedPartitionHeads, normalized.Observer),
 	}, nil
 }
 
@@ -229,9 +228,10 @@ func (r *Reader) consumeFromTimestampFromHead(ctx context.Context, head pmeta.Pa
 
 	from := head.OldestLSN
 	for from < head.NextLSN {
+		pageStart := from
 		page, err := r.catalog.ListSegments(ctx, catalog.ListSegmentsRequest{
 			Partition: req.Partition,
-			FromLSN:   from,
+			FromLSN:   pageStart,
 			Limit:     catalog.MaxSegmentPageLimit,
 		})
 		if err != nil {
@@ -274,10 +274,12 @@ func (r *Reader) consumeFromTimestampFromHead(ctx context.Context, head pmeta.Pa
 			return r.consumeFromHeadOnce(ctx, head, req.Partition, startLSN, limit)
 		}
 		if page.HasMore {
-			if page.NextLSN <= from {
-				return ConsumeResult{}, fmt.Errorf("%w: non-advancing page next_lsn=%d from_lsn=%d", ErrCorruptData, page.NextLSN, from)
+			if page.NextLSN <= pageStart {
+				return ConsumeResult{}, fmt.Errorf("%w: non-advancing page next_lsn=%d from_lsn=%d", ErrCorruptData, page.NextLSN, pageStart)
 			}
-			from = page.NextLSN
+			if page.NextLSN > from {
+				from = page.NextLSN
+			}
 			advanced = true
 		}
 		if !advanced {
@@ -438,8 +440,8 @@ func (r *Reader) readSegment(ctx context.Context, segment pmeta.SegmentRef, from
 			Partition:   record.Partition,
 			LSN:         record.LSN,
 			TimestampMS: record.TimestampMS,
-			Headers:     segformat.CloneHeaders(record.Headers),
-			Value:       append([]byte(nil), record.Value...),
+			Headers:     record.Headers,
+			Value:       record.Value,
 		})
 	}
 	return out, nil
@@ -458,6 +460,12 @@ func normalizeOptions(opts Options) (Options, error) {
 	}
 	if opts.MaxRecordsPerBatch < 0 {
 		return Options{}, fmt.Errorf("%w: max_records_per_batch=%d", ErrInvalidOptions, opts.MaxRecordsPerBatch)
+	}
+	if opts.MaxCachedPartitionHeads == 0 {
+		opts.MaxCachedPartitionHeads = DefaultMaxCachedPartitionHeads
+	}
+	if opts.MaxCachedPartitionHeads < 0 {
+		return Options{}, fmt.Errorf("%w: max_cached_partition_heads=%d", ErrInvalidOptions, opts.MaxCachedPartitionHeads)
 	}
 	if opts.SegmentOptions == (segreader.Options{}) {
 		opts.SegmentOptions = segreader.DefaultOptions()
