@@ -28,7 +28,7 @@ selects the derivation grammar for `.plseg` object keys, not the layout of
 ## Canonical corpus
 
 Language-neutral fixtures live in
-[`internal/catformat/testdata/v1`](./internal/catformat/testdata/v1). The
+[`testdata/catformat/v1`](../../../testdata/catformat/v1). The
 manifest records each object's exact size, SHA-256 digest, object kind, hash
 algorithm, and page ID where applicable.
 

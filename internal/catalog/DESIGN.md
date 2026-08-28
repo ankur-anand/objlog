@@ -37,9 +37,6 @@ The catalog is not responsible for:
 - event-level compaction or segment rewrite;
 - cross-partition transactions.
 
-Detailed retention and physical reclamation behavior is defined in
-[`objlog/LIFECYCLE.md`](../LIFECYCLE.md).
-
 ## Package Layout
 
 `objlog/internal/catalog` is the common catalog API. It contains errors, request

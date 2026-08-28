@@ -8,7 +8,7 @@ for readers.
 
 The binary format specification, checked-in compatibility corpus, and
 cross-language verification contract are documented in
-[`segformat/COMPATIBILITY.md`](../segformat/COMPATIBILITY.md).
+[`internal/segformat/COMPATIBILITY.md`](../internal/segformat/COMPATIBILITY.md).
 
 ## Open A Log
 
@@ -209,9 +209,6 @@ One `Run` call is finite: it fairly requeues bounded continuations up to
 `MaxPassesPerTask`, reports still-busy partitions as deferred, and returns. The
 caller remains responsible for partition discovery and the recurring schedule.
 Nothing runs implicitly inside writers or readers.
-
-The physical object lifecycle is defined in
-[`LIFECYCLE.md`](../LIFECYCLE.md).
 
 ## Read
 

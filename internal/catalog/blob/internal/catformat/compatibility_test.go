@@ -27,7 +27,7 @@ type corpusFixture struct {
 }
 
 func TestCompatibilityCorpus(t *testing.T) {
-	root := filepath.Join("testdata", "v1")
+	root := filepath.Join("..", "..", "..", "..", "..", "testdata", "catformat", "v1")
 	manifestBytes, err := os.ReadFile(filepath.Join(root, "manifest.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -110,7 +110,7 @@ func assertCorpusPageID(t *testing.T, id [16]byte, encoded string) {
 }
 
 func ExampleParseHead() {
-	encoded, err := os.ReadFile("testdata/v1/empty-head-crc32c.plc")
+	encoded, err := os.ReadFile("../../../../../testdata/catformat/v1/empty-head-crc32c.plc")
 	if err != nil {
 		panic(err)
 	}

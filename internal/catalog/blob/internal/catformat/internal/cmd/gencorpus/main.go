@@ -30,7 +30,7 @@ type manifest struct {
 }
 
 func main() {
-	out := flag.String("out", "testdata/v1", "output directory")
+	out := flag.String("out", "../../../../../testdata/catformat/v1", "output directory")
 	flag.Parse()
 	if err := os.MkdirAll(*out, 0o755); err != nil {
 		panic(err)
