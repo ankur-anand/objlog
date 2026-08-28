@@ -1,0 +1,1752 @@
+package writer
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/ankur-anand/objlog/catalog"
+	"github.com/ankur-anand/objlog/pmeta"
+	"github.com/ankur-anand/objlog/segformat"
+	"github.com/ankur-anand/objlog/segwriter"
+)
+
+func TestWriterFlushPublishesSegment(t *testing.T) {
+	t.Parallel()
+
+	cat := catalog.NewMemoryCatalog()
+	factory := newMemorySegmentFactory()
+	w, err := New(testOptions(t, cat, factory))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	first, err := w.Append(context.Background(), Record{TimestampMS: 10, Value: []byte("alpha")})
+	if err != nil {
+		t.Fatalf("Append(first) error = %v", err)
+	}
+	second, err := w.Append(context.Background(), Record{TimestampMS: 11, Value: []byte("beta")})
+	if err != nil {
+		t.Fatalf("Append(second) error = %v", err)
+	}
+	if first.LSN != 0 || second.LSN != 1 {
+		t.Fatalf("assigned LSNs = %d,%d want 0,1", first.LSN, second.LSN)
+	}
+
+	snapshot, err := w.Flush(context.Background())
+	if err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	if snapshot.Head.NextLSN != 2 || snapshot.Head.SegmentCount != 1 {
+		t.Fatalf("flush snapshot = %+v", snapshot)
+	}
+	last, ok := snapshot.Head.Last()
+	if !ok {
+		t.Fatal("Flush() returned snapshot without last segment")
+	}
+	if got := factory.Bytes(last.URI); len(got) == 0 {
+		t.Fatalf("stored bytes for %s are empty", last.URI)
+	}
+}
+
+func TestWriterAppendCallerTimeoutDuringSegmentBackpressureIsNonTerminal(t *testing.T) {
+	t.Parallel()
+
+	cat := catalog.NewMemoryCatalog()
+	factory := newBlockingWriteSegmentFactory()
+	opts := testOptions(t, cat, factory)
+	opts.Roll.MaxSegmentRecords = 0
+	opts.Roll.MaxSegmentRawBytes = 0
+	opts.SegmentOptions.TargetBlockSize = 32
+	opts.SegmentOptions.PartSize = 16
+	opts.SegmentOptions.SealParallelism = 1
+	opts.SegmentOptions.BlockBufferCount = 2
+	opts.SegmentOptions.UploadParallelism = 1
+	opts.SegmentOptions.UploadQueueSize = 1
+
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() {
+		factory.unblock()
+		_ = w.Abort(context.Background())
+	}()
+
+	for i := 0; i < 2; i++ {
+		result, err := w.Append(context.Background(), Record{
+			TimestampMS: int64(i + 1),
+			Value:       bytes.Repeat([]byte{byte('a' + i)}, 24),
+		})
+		if err != nil {
+			t.Fatalf("Append(%d) error = %v", i, err)
+		}
+		if result.LSN != uint64(i) {
+			t.Fatalf("Append(%d) LSN = %d, want %d", i, result.LSN, i)
+		}
+	}
+	factory.waitForWrite(t)
+
+	third := Record{TimestampMS: 3, Value: bytes.Repeat([]byte("c"), 24)}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := w.Append(ctx, third); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Append(blocked) error = %v, want %v", err, context.DeadlineExceeded)
+	}
+	if err := w.Err(); err != nil {
+		t.Fatalf("Err() after caller timeout = %v, want nil", err)
+	}
+	if got := w.State().OptimisticNextLSN; got != 2 {
+		t.Fatalf("OptimisticNextLSN after rejected append = %d, want 2", got)
+	}
+
+	factory.unblock()
+	result, err := w.Append(context.Background(), third)
+	if err != nil {
+		t.Fatalf("Append(retry) error = %v", err)
+	}
+	if result.LSN != 2 {
+		t.Fatalf("Append(retry) LSN = %d, want 2", result.LSN)
+	}
+	snapshot, err := w.Flush(context.Background())
+	if err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	if snapshot.Head.NextLSN != 3 {
+		t.Fatalf("NextLSN = %d, want 3", snapshot.Head.NextLSN)
+	}
+	last, ok := snapshot.Head.Last()
+	if !ok || last.RecordCount != 3 {
+		t.Fatalf("last segment = %+v, present=%v, want three records", last, ok)
+	}
+}
+
+func TestWriterCommittedNotifiesAfterPublicationAndOnClose(t *testing.T) {
+	t.Parallel()
+
+	session := newBlockingSession(1)
+	w, err := New(testSessionOptions(session, newMemorySegmentFactory()))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	changed := w.Committed()
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 10, Value: []byte("alpha")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	select {
+	case <-changed:
+		t.Fatal("Committed() notified before catalog publication")
+	default:
+	}
+
+	session.ReleaseOne()
+	select {
+	case <-changed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for committed notification")
+	}
+	if got := w.State().Snapshot.Head.NextLSN; got != 1 {
+		t.Fatalf("committed NextLSN = %d, want 1", got)
+	}
+
+	// A closed generation channel broadcasts to every waiter.
+	select {
+	case <-changed:
+	default:
+		t.Fatal("committed generation channel is not closed")
+	}
+
+	next := w.Committed()
+	if next == changed {
+		t.Fatal("Committed() did not advance to a new generation channel")
+	}
+	select {
+	case <-next:
+		t.Fatal("next committed generation was already closed")
+	default:
+	}
+
+	if _, err := w.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	select {
+	case <-next:
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal writer did not close committed notification")
+	}
+	select {
+	case <-w.Committed():
+	default:
+		t.Fatal("Committed() must remain closed after Close")
+	}
+}
+
+func TestWriterAppliesRetentionWithoutChangingAppendPosition(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	cat := catalog.NewMemoryCatalog()
+	opts := testOptions(t, cat, newMemorySegmentFactory())
+	opts.Roll.MaxSegmentRecords = 1
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := w.Append(ctx, Record{TimestampMS: int64(i), Value: []byte("x")}); err != nil {
+			t.Fatalf("Append(%d) error = %v", i, err)
+		}
+	}
+	if _, err := w.Flush(ctx); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	if _, err := cat.RequestRetention(ctx, 1, catalog.RetentionRequest{
+		Version:       catalog.RetentionRequestVersion,
+		PolicyVersion: 1,
+		BeforeLSN:     2,
+		CreatedUnixMS: 1,
+	}); err != nil {
+		t.Fatalf("RequestRetention() error = %v", err)
+	}
+
+	changed := w.Committed()
+	result, err := w.ApplyPendingRetention(ctx)
+	if err != nil {
+		t.Fatalf("ApplyPendingRetention() error = %v", err)
+	}
+	if !result.Applied || result.Snapshot.Head.OldestLSN != 2 || result.RequestedLSN != 2 || result.PolicyVersion != 1 {
+		t.Fatalf("retention result = %+v", result)
+	}
+	select {
+	case <-changed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retention snapshot change did not notify Committed()")
+	}
+	state := w.State()
+	if state.OptimisticNextLSN != 3 || state.Snapshot.Head.NextLSN != 3 || state.Snapshot.Head.SegmentCount != 3 {
+		t.Fatalf("writer state after retention = %+v", state)
+	}
+	if _, err := w.Append(ctx, Record{TimestampMS: 3, Value: []byte("next")}); err != nil {
+		t.Fatalf("Append(after retention) error = %v", err)
+	}
+	if _, err := w.Close(ctx); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestWriterRetentionIsOptional(t *testing.T) {
+	t.Parallel()
+
+	w, err := New(testSessionOptions(newBlockingSession(1), newMemorySegmentFactory()))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := w.ApplyPendingRetention(context.Background()); !errors.Is(err, ErrRetentionUnsupported) {
+		t.Fatalf("ApplyPendingRetention() error = %v, want %v", err, ErrRetentionUnsupported)
+	}
+	if err := w.Abort(context.Background()); err != nil {
+		t.Fatalf("Abort() error = %v", err)
+	}
+}
+
+func TestWriterForegroundRetentionFailureIsNotSurfacedTwice(t *testing.T) {
+	t.Parallel()
+
+	staleErr := fmt.Errorf("%w: successor claimed fence", ErrStaleWriter)
+	session := &sessionStub{
+		snapshot: terminalCleanupSnapshot(),
+		retention: func(context.Context, Snapshot) (RetentionResult, error) {
+			return RetentionResult{}, staleErr
+		},
+	}
+	w, err := New(testSessionOptions(session, newMemorySegmentFactory()))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := w.ApplyPendingRetention(context.Background()); !errors.Is(err, staleErr) {
+		t.Fatalf("ApplyPendingRetention() error = %v, want stale error", err)
+	}
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("x")}); !errors.Is(err, ErrAborted) {
+		t.Fatalf("Append() error = %v, want ErrAborted after surfaced terminal cause", err)
+	}
+	if err := w.Abort(context.Background()); err != nil {
+		t.Fatalf("Abort() error = %v", err)
+	}
+}
+
+func TestWriterSerializesRetentionWithSegmentPublication(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	session := newSerializedRetentionSession(1)
+	w, err := New(testSessionOptions(session, newMemorySegmentFactory()))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := w.Append(ctx, Record{TimestampMS: 1, Value: []byte("x")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	select {
+	case <-session.publishEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for segment publication")
+	}
+
+	callStarted := make(chan struct{})
+	applyDone := make(chan error, 1)
+	go func() {
+		close(callStarted)
+		_, err := w.ApplyPendingRetention(ctx)
+		applyDone <- err
+	}()
+	<-callStarted
+	select {
+	case <-session.retentionEntered:
+		t.Fatal("retention entered session while segment publication was active")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(session.releasePublish)
+	select {
+	case <-session.retentionEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retention did not enter after publication completed")
+	}
+	if err := <-applyDone; err != nil {
+		t.Fatalf("ApplyPendingRetention() error = %v", err)
+	}
+	if _, err := w.Close(ctx); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestWriterCutSwapsAndAllowsContinuedAppend(t *testing.T) {
+	t.Parallel()
+
+	session := newBlockingSession(1)
+	opts := testSessionOptions(session, newMemorySegmentFactory())
+	opts.Roll.MaxSegmentRecords = 0
+	opts.Roll.MaxSegmentRawBytes = 0
+	opts.Queue = QueuePolicy{
+		MaxInflightSegments: 4,
+		MaxInflightBytes:    DefaultMaxInflightBytes,
+	}
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append(first) error = %v", err)
+	}
+	if err := w.Cut(context.Background()); err != nil {
+		t.Fatalf("Cut() error = %v", err)
+	}
+	second, err := w.Append(context.Background(), Record{TimestampMS: 2, Value: []byte("b")})
+	if err != nil {
+		t.Fatalf("Append(second) error = %v", err)
+	}
+	if second.LSN != 1 {
+		t.Fatalf("Append(second) LSN = %d, want 1", second.LSN)
+	}
+	state := w.State()
+	if state.OptimisticNextLSN != 2 {
+		t.Fatalf("OptimisticNextLSN = %d, want 2", state.OptimisticNextLSN)
+	}
+	if state.InflightSegments != 1 {
+		t.Fatalf("InflightSegments = %d, want 1", state.InflightSegments)
+	}
+
+	session.ReleaseOne()
+	session.ReleaseOne()
+	if _, err := w.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+}
+
+func TestWriterRollsByMaxSegmentRecords(t *testing.T) {
+	t.Parallel()
+
+	cat := catalog.NewMemoryCatalog()
+	factory := newMemorySegmentFactory()
+	opts := testOptions(t, cat, factory)
+	opts.Roll.MaxSegmentRecords = 2
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	for i := 0; i < 5; i++ {
+		result, err := w.Append(context.Background(), Record{TimestampMS: int64(i), Value: []byte("x")})
+		if err != nil {
+			t.Fatalf("Append(%d) error = %v", i, err)
+		}
+		if result.LSN != uint64(i) {
+			t.Fatalf("Append(%d) LSN = %d, want %d", i, result.LSN, i)
+		}
+	}
+	snapshot, err := w.Close(context.Background())
+	if err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if snapshot.Head.NextLSN != 5 || snapshot.Head.SegmentCount != 3 {
+		t.Fatalf("Close() snapshot = %+v", snapshot)
+	}
+
+	page, err := cat.ListSegments(context.Background(), catalog.ListSegmentsRequest{Partition: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListSegments() error = %v", err)
+	}
+	if got, want := len(page.Segments), 3; got != want {
+		t.Fatalf("segments = %d, want %d: %+v", got, want, page.Segments)
+	}
+	assertRange(t, page.Segments[0], 0, 1)
+	assertRange(t, page.Segments[1], 2, 3)
+	assertRange(t, page.Segments[2], 4, 4)
+}
+
+func TestWriterCutsByMaxSegmentAge(t *testing.T) {
+	cat := catalog.NewMemoryCatalog()
+	factory := newMemorySegmentFactory()
+	opts := testOptions(t, cat, factory)
+	opts.Clock = SystemClock{}
+	opts.Roll.MaxSegmentAge = 10 * time.Millisecond
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append(first) error = %v", err)
+	}
+	waitForWriterSegmentCount(t, w, 1)
+
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 2, Value: []byte("b")}); err != nil {
+		t.Fatalf("Append(second) error = %v", err)
+	}
+	snapshot, err := w.Close(context.Background())
+	if err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if snapshot.Head.SegmentCount != 2 {
+		t.Fatalf("SegmentCount = %d, want 2", snapshot.Head.SegmentCount)
+	}
+}
+
+func TestWriterMaxSegmentAgeUsesConfiguredClock(t *testing.T) {
+	cat := catalog.NewMemoryCatalog()
+	opts := testOptions(t, cat, newMemorySegmentFactory())
+	now := time.Unix(1_800_000_000, 0)
+	clock := newManualClock(now)
+	opts.Clock = clock
+	opts.Roll.MaxSegmentAge = time.Hour
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = w.Abort(context.Background()) })
+
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	w.mu.Lock()
+	firstRecordAt := w.active.firstRecordAt
+	w.mu.Unlock()
+	if !firstRecordAt.Equal(now) {
+		t.Fatalf("firstRecordAt = %s, want configured clock time %s", firstRecordAt, now)
+	}
+
+	select {
+	case <-clock.timerCreated:
+	case <-time.After(2 * time.Second):
+		t.Fatal("age loop did not create a timer through the configured clock")
+	}
+	clock.Advance(time.Hour)
+	waitForWriterSegmentCount(t, w, 1)
+}
+
+func TestWriterAgeCutRetriesSegmentStartFailure(t *testing.T) {
+	t.Parallel()
+
+	factory := &flakySegmentFactory{
+		next: newMemorySegmentFactory(),
+		fail: map[uint64]error{
+			1: errors.New("temporary sink start failure"),
+		},
+	}
+	opts := testOptions(t, catalog.NewMemoryCatalog(), factory)
+	opts.Clock = SystemClock{}
+	opts.Roll.MaxSegmentRecords = 0
+	opts.Roll.MaxSegmentRawBytes = 0
+	opts.Roll.MaxSegmentAge = 10 * time.Millisecond
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = w.Abort(context.Background()) })
+
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for factory.Calls() < 3 {
+		if err := w.Err(); err != nil {
+			t.Fatalf("writer became terminal after retryable age-cut start failure: %v", err)
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("age cut was not retried after start failure; factory calls=%d state=%+v", factory.Calls(), w.State())
+		case <-ticker.C:
+		}
+	}
+	if err := w.Err(); err != nil {
+		t.Fatalf("Err() after successful age-cut retry = %v, want nil", err)
+	}
+	waitForWriterSegmentCount(t, w, 1)
+}
+
+func TestWriterMaxSegmentAgeStartsAtFirstRecordAfterPolicyCut(t *testing.T) {
+	cat := catalog.NewMemoryCatalog()
+	opts := testOptions(t, cat, newMemorySegmentFactory())
+	opts.Clock = SystemClock{}
+	opts.Roll.MaxSegmentRecords = 2
+	opts.Roll.MaxSegmentAge = time.Hour
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = w.Abort(context.Background()) })
+
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append(first) error = %v", err)
+	}
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 2, Value: []byte("b")}); err != nil {
+		t.Fatalf("Append(second) error = %v", err)
+	}
+
+	w.mu.Lock()
+	if w.active == nil {
+		w.mu.Unlock()
+		t.Fatal("active segment is nil after policy cut")
+	}
+	if w.active.records != 0 {
+		t.Fatalf("active records after policy cut = %d, want 0", w.active.records)
+	}
+	if !w.active.firstRecordAt.IsZero() {
+		t.Fatalf("firstRecordAt after empty active segment = %s, want zero", w.active.firstRecordAt)
+	}
+	w.mu.Unlock()
+
+	beforeThird := time.Now()
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 3, Value: []byte("c")}); err != nil {
+		t.Fatalf("Append(third) error = %v", err)
+	}
+
+	w.mu.Lock()
+	got := w.active.firstRecordAt
+	w.mu.Unlock()
+	if got.IsZero() {
+		t.Fatal("firstRecordAt after third append is zero")
+	}
+	if got.Before(beforeThird) {
+		t.Fatalf("firstRecordAt = %s before third append start %s", got, beforeThird)
+	}
+}
+
+func TestWriterContinuesFromCatalogHead(t *testing.T) {
+	t.Parallel()
+
+	cat := catalog.NewMemoryCatalog()
+	preloadWriter, err := cat.OpenWriter(context.Background(), 1, [16]byte{1})
+	if err != nil {
+		t.Fatalf("OpenWriter(preload) error = %v", err)
+	}
+	if _, err := preloadWriter.AppendSegment(context.Background(), testCatalogSegment(1, 0, 1, preloadWriter.Epoch())); err != nil {
+		t.Fatalf("preload catalog error = %v", err)
+	}
+
+	factory := newMemorySegmentFactory()
+	w, err := New(testOptions(t, cat, factory))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	result, err := w.Append(context.Background(), Record{TimestampMS: 2, Value: []byte("next")})
+	if err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	if result.LSN != 2 {
+		t.Fatalf("LSN = %d, want 2", result.LSN)
+	}
+	snapshot, err := w.Close(context.Background())
+	if err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	last, ok := snapshot.Head.Last()
+	if !ok {
+		t.Fatal("Close() snapshot missing last segment")
+	}
+	assertRange(t, last, 2, 2)
+}
+
+func TestWriterRejectsTimestampRegression(t *testing.T) {
+	t.Parallel()
+
+	w, err := New(testOptions(t, catalog.NewMemoryCatalog(), newMemorySegmentFactory()))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 10, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append(first) error = %v", err)
+	}
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 9, Value: []byte("b")}); !errors.Is(err, ErrTimestampOrder) {
+		t.Fatalf("Append(regression) error = %v, want %v", err, ErrTimestampOrder)
+	}
+	if !errors.Is(w.Err(), ErrTimestampOrder) {
+		t.Fatalf("Err() = %v, want %v", w.Err(), ErrTimestampOrder)
+	}
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 11, Value: []byte("c")}); !errors.Is(err, ErrAborted) {
+		t.Fatalf("Append(after regression) error = %v, want %v", err, ErrAborted)
+	}
+}
+
+func TestWriterCutBackpressureOnInflight(t *testing.T) {
+	t.Parallel()
+
+	session := newBlockingSession(1)
+	opts := testSessionOptions(session, newMemorySegmentFactory())
+	opts.Roll.MaxSegmentRecords = 0
+	opts.Roll.MaxSegmentRawBytes = 0
+	opts.Queue = QueuePolicy{
+		MaxInflightSegments: 1,
+		MaxInflightBytes:    DefaultMaxInflightBytes,
+	}
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append(first) error = %v", err)
+	}
+	if err := w.Cut(context.Background()); err != nil {
+		t.Fatalf("Cut(first) error = %v", err)
+	}
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 2, Value: []byte("b")}); err != nil {
+		t.Fatalf("Append(second) error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := w.Cut(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Cut(second) error = %v, want %v", err, context.DeadlineExceeded)
+	}
+
+	session.ReleaseOne()
+	time.Sleep(20 * time.Millisecond)
+	if err := w.Cut(context.Background()); err != nil {
+		t.Fatalf("Cut(third) error = %v", err)
+	}
+	session.ReleaseOne()
+	if _, err := w.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+}
+
+func TestWriterFlushWaitsForInflight(t *testing.T) {
+	t.Parallel()
+
+	session := newBlockingSession(1)
+	w, err := New(testSessionOptions(session, newMemorySegmentFactory()))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Flush(context.Background())
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("Flush() returned early with err=%v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	session.ReleaseOne()
+	if err := <-done; err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+}
+
+func TestWriterCanceledFlushDoesNotAbandonAcceptedWork(t *testing.T) {
+	t.Parallel()
+
+	session := newBlockingSession(1)
+	w, err := New(testSessionOptions(session, newMemorySegmentFactory()))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("accepted")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := w.Flush(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Flush() error = %v, want context deadline", err)
+	}
+	if err := w.Err(); err != nil {
+		t.Fatalf("Writer.Err() = %v, caller cancellation must not be terminal", err)
+	}
+
+	session.ReleaseOne()
+	snapshot, err := w.Flush(context.Background())
+	if err != nil {
+		t.Fatalf("retried Flush() error = %v", err)
+	}
+	if snapshot.Head.NextLSN != 1 {
+		t.Fatalf("retried Flush() next_lsn = %d, want 1", snapshot.Head.NextLSN)
+	}
+	if _, err := w.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestWriterAsyncPublishFailureSurfacesOnce(t *testing.T) {
+	t.Parallel()
+
+	session := &sessionStub{
+		snapshot: Snapshot{
+			Head: pmeta.PartitionHead{
+				Partition:   1,
+				WriterEpoch: 1,
+			},
+			Identity: WriterIdentity{
+				Epoch: 1,
+				Tag:   [16]byte{9, 8, 7},
+			},
+		},
+		publish: func(context.Context, PublishRequest, Snapshot) (Snapshot, error) {
+			return Snapshot{}, fmt.Errorf("%w: boom", ErrPublishFailed)
+		},
+	}
+	opts := testSessionOptions(session, newMemorySegmentFactory())
+	opts.Roll.MaxSegmentRecords = 0
+	opts.Roll.MaxSegmentRawBytes = 0
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	changed := w.Committed()
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append(first) error = %v", err)
+	}
+	if err := w.Cut(context.Background()); err != nil {
+		t.Fatalf("Cut() error = %v", err)
+	}
+	for i := 0; i < 50; i++ {
+		if errors.Is(w.Err(), ErrPublishFailed) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !errors.Is(w.Err(), ErrPublishFailed) {
+		t.Fatalf("Err() = %v, want %v", w.Err(), ErrPublishFailed)
+	}
+	select {
+	case <-changed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("async publish failure did not close committed notification")
+	}
+	select {
+	case <-w.Committed():
+	default:
+		t.Fatal("Committed() must remain closed after terminal publish failure")
+	}
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 2, Value: []byte("b")}); !errors.Is(err, ErrPublishFailed) {
+		t.Fatalf("Append(after async failure) error = %v, want %v", err, ErrPublishFailed)
+	}
+	if _, err := w.Flush(context.Background()); !errors.Is(err, ErrAborted) {
+		t.Fatalf("Flush(after surfaced async failure) error = %v, want %v", err, ErrAborted)
+	}
+}
+
+func TestWriterAutomaticCutDoesNotConsumeAsyncFailure(t *testing.T) {
+	t.Parallel()
+
+	cause := fmt.Errorf("%w: boom", ErrPublishFailed)
+	w := &Writer{
+		aborted:  true,
+		firstErr: cause,
+	}
+
+	w.mu.Lock()
+	w.tryCutAfterAppendLocked(context.Background())
+	if w.firstErrSurface {
+		w.mu.Unlock()
+		t.Fatal("automatic cut consumed the asynchronous terminal cause")
+	}
+	if err := w.foregroundErrLocked(); !errors.Is(err, ErrPublishFailed) {
+		w.mu.Unlock()
+		t.Fatalf("first foreground error = %v, want %v", err, ErrPublishFailed)
+	}
+	if err := w.foregroundErrLocked(); !errors.Is(err, ErrAborted) {
+		w.mu.Unlock()
+		t.Fatalf("second foreground error = %v, want %v", err, ErrAborted)
+	}
+	w.mu.Unlock()
+}
+
+func TestWriterCutFailureBeforeSwapKeepsWriterUsable(t *testing.T) {
+	t.Parallel()
+
+	factory := &flakySegmentFactory{
+		next: newMemorySegmentFactory(),
+		fail: map[uint64]error{
+			1: errors.New("start next segment failed"),
+		},
+	}
+	opts := DefaultOptions(factory)
+	opts.Session = &sessionStub{
+		snapshot: Snapshot{
+			Head: pmeta.PartitionHead{
+				Partition:   1,
+				WriterEpoch: 1,
+			},
+			Identity: WriterIdentity{
+				Epoch: 1,
+				Tag:   [16]byte{1},
+			},
+		},
+		publish: func(_ context.Context, req PublishRequest, current Snapshot) (Snapshot, error) {
+			next := current
+			next.Head.NextLSN = req.Segment.NextLSN()
+			next.Head.WriterEpoch = current.Identity.Epoch
+			next.Head.SegmentCount++
+			next.Head.ReachableSegmentCount++
+			next.Head.LastSegment = req.Segment
+			next.Head.HasLastSegment = true
+			return next, nil
+		},
+	}
+	opts.Clock = ClockFunc(func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() })
+	opts.UUIDGen = newSequenceUUIDGen()
+	opts.SegmentOptions = newTestSegmentOptions(1)
+	opts.Roll.MaxSegmentRecords = 0
+	opts.Roll.MaxSegmentRawBytes = 0
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append(first) error = %v", err)
+	}
+	if err := w.Cut(context.Background()); err == nil {
+		t.Fatal("Cut() error = nil, want failure before swap")
+	} else if !errors.Is(err, ErrSegmentStartFailed) {
+		t.Fatalf("Cut() error = %v, want %v", err, ErrSegmentStartFailed)
+	}
+	if w.Err() != nil {
+		t.Fatalf("Err() = %v, want nil after pre-swap cut failure", w.Err())
+	}
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 2, Value: []byte("b")}); err != nil {
+		t.Fatalf("Append(second) error = %v, want writer still usable", err)
+	}
+}
+
+func TestWriterRollAfterStartFailureRetriesBeforeNextAppend(t *testing.T) {
+	t.Parallel()
+
+	factory := &flakySegmentFactory{
+		next: newMemorySegmentFactory(),
+		fail: map[uint64]error{
+			1: errors.New("start next segment failed"),
+		},
+	}
+	opts := testSessionOptions(&sessionStub{
+		snapshot: Snapshot{
+			Head: pmeta.PartitionHead{
+				Partition:   1,
+				WriterEpoch: 1,
+			},
+			Identity: WriterIdentity{
+				Epoch: 1,
+				Tag:   [16]byte{1},
+			},
+		},
+		publish: func(_ context.Context, req PublishRequest, current Snapshot) (Snapshot, error) {
+			next := current
+			next.Head.NextLSN = req.Segment.NextLSN()
+			next.Head.WriterEpoch = current.Identity.Epoch
+			next.Head.SegmentCount++
+			next.Head.ReachableSegmentCount++
+			next.Head.LastSegment = req.Segment
+			next.Head.HasLastSegment = true
+			return next, nil
+		},
+	}, factory)
+	opts.Clock = ClockFunc(func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() })
+	opts.UUIDGen = newSequenceUUIDGen()
+	opts.SegmentOptions = newTestSegmentOptions(1)
+	opts.Roll.MaxSegmentRecords = 1
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	first, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")})
+	if err != nil {
+		t.Fatalf("Append(first) error = %v", err)
+	}
+	if first.LSN != 0 {
+		t.Fatalf("Append(first) LSN = %d, want 0", first.LSN)
+	}
+	if w.Err() != nil {
+		t.Fatalf("Err() = %v, want nil after roll-after start failure", w.Err())
+	}
+	if state := w.State(); state.OptimisticNextLSN != 1 || state.InflightSegments != 0 {
+		t.Fatalf("state after failed roll-after = %+v, want next_lsn=1 inflight=0", state)
+	}
+
+	second, err := w.Append(context.Background(), Record{TimestampMS: 2, Value: []byte("b")})
+	if err != nil {
+		t.Fatalf("Append(second) error = %v, want retry cut before append", err)
+	}
+	if second.LSN != 1 {
+		t.Fatalf("Append(second) LSN = %d, want 1", second.LSN)
+	}
+
+	snapshot, err := w.Flush(context.Background())
+	if err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	if snapshot.Head.NextLSN != 2 || snapshot.Head.SegmentCount != 2 {
+		t.Fatalf("Flush() snapshot = %+v, want 2 one-record segments", snapshot)
+	}
+}
+
+func TestWriterAppendStartFailureIsRetryable(t *testing.T) {
+	t.Parallel()
+
+	factory := &flakySegmentFactory{
+		next: newMemorySegmentFactory(),
+		fail: map[uint64]error{0: errors.New("sink unavailable")},
+	}
+	opts := testSessionOptions(&sessionStub{
+		snapshot: Snapshot{
+			Head: pmeta.PartitionHead{
+				Partition:   1,
+				WriterEpoch: 1,
+			},
+			Identity: WriterIdentity{
+				Epoch: 1,
+				Tag:   [16]byte{1},
+			},
+		},
+		publish: func(_ context.Context, req PublishRequest, current Snapshot) (Snapshot, error) {
+			next := current
+			next.Head.NextLSN = req.Segment.NextLSN()
+			next.Head.WriterEpoch = current.Identity.Epoch
+			next.Head.SegmentCount++
+			next.Head.ReachableSegmentCount++
+			next.Head.LastSegment = req.Segment
+			next.Head.HasLastSegment = true
+			return next, nil
+		},
+	}, factory)
+	opts.Clock = ClockFunc(func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() })
+	opts.UUIDGen = newSequenceUUIDGen()
+	opts.SegmentOptions = newTestSegmentOptions(1)
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err == nil {
+		t.Fatal("Append() error = nil, want start failure")
+	} else if !errors.Is(err, ErrSegmentStartFailed) {
+		t.Fatalf("Append() error = %v, want %v", err, ErrSegmentStartFailed)
+	}
+	if w.Err() != nil {
+		t.Fatalf("Err() = %v, want nil after append start failure", w.Err())
+	}
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append(retry) error = %v, want writer still usable", err)
+	}
+}
+
+func TestWriterForegroundFailureCleanupUsesBestEffortAbortContext(t *testing.T) {
+	t.Parallel()
+
+	factory := newCleanupAwareSegmentFactory()
+	opts := testSessionOptions(&sessionStub{
+		snapshot: Snapshot{
+			Head: pmeta.PartitionHead{
+				Partition:   1,
+				WriterEpoch: 1,
+			},
+			Identity: WriterIdentity{
+				Epoch: 1,
+				Tag:   [16]byte{1},
+			},
+		},
+		publish: func(_ context.Context, req PublishRequest, current Snapshot) (Snapshot, error) {
+			next := current
+			next.Head.NextLSN = req.Segment.NextLSN()
+			next.Head.WriterEpoch = current.Identity.Epoch
+			next.Head.SegmentCount++
+			next.Head.ReachableSegmentCount++
+			next.Head.LastSegment = req.Segment
+			next.Head.HasLastSegment = true
+			return next, nil
+		},
+	}, factory)
+	opts.Roll.MaxSegmentRecords = 0
+	opts.Roll.MaxSegmentRawBytes = 0
+	opts.SegmentOptions.TargetBlockSize = 32
+	opts.SegmentOptions.PartSize = 16
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("aaaaaaaaaaaaaaaaaaaaaaaa")}); err != nil {
+		t.Fatalf("Append(first) error = %v", err)
+	}
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 2, Value: []byte("bbbbbbbbbbbbbbbbbbbbbbbb")}); err != nil {
+		t.Fatalf("Append(second) error = %v", err)
+	}
+
+	sink := factory.firstSink(t)
+	sink.waitBeginStarted(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := w.Append(ctx, Record{TimestampMS: 1, Value: []byte("c")}); !errors.Is(err, ErrTimestampOrder) {
+		t.Fatalf("Append(regression) error = %v, want %v", err, ErrTimestampOrder)
+	}
+
+	sink.waitAbort(t)
+	if got := sink.abortCtxErr(); got != nil {
+		t.Fatalf("Abort() ctx.Err() = %v, want nil cleanup context", got)
+	}
+}
+
+func TestWriterRejectsInflightBudgetBelowMaximumSegmentEstimate(t *testing.T) {
+	t.Parallel()
+
+	opts := testSessionOptions(&sessionStub{
+		snapshot: Snapshot{
+			Head: pmeta.PartitionHead{
+				Partition:   1,
+				WriterEpoch: 1,
+			},
+			Identity: WriterIdentity{
+				Epoch: 1,
+				Tag:   [16]byte{1},
+			},
+		},
+		publish: func(_ context.Context, req PublishRequest, current Snapshot) (Snapshot, error) {
+			next := current
+			next.Head.NextLSN = req.Segment.NextLSN()
+			next.Head.WriterEpoch = current.Identity.Epoch
+			next.Head.SegmentCount++
+			next.Head.ReachableSegmentCount++
+			next.Head.LastSegment = req.Segment
+			next.Head.HasLastSegment = true
+			return next, nil
+		},
+	}, newMemorySegmentFactory())
+	opts.Roll.MaxSegmentRecords = 0
+	opts.Roll.MaxSegmentRawBytes = 0
+	opts.Roll.MaxSegmentAge = time.Millisecond
+	opts.Queue = QueuePolicy{
+		MaxInflightSegments: 1,
+		MaxInflightBytes:    uint64(segformat.RecordHeaderSize + 1),
+	}
+	if _, err := New(opts); !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("New() error = %v, want %v", err, ErrInvalidOptions)
+	}
+}
+
+func TestWriterCloseEmptyIsNoop(t *testing.T) {
+	t.Parallel()
+
+	w, err := New(testOptions(t, catalog.NewMemoryCatalog(), newMemorySegmentFactory()))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	snapshot, err := w.Close(context.Background())
+	if err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if snapshot.Head.Partition != 1 || snapshot.Head.NextLSN != 0 {
+		t.Fatalf("Close(empty) snapshot = %+v", snapshot)
+	}
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("x")}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Append(after close) error = %v, want %v", err, ErrClosed)
+	}
+}
+
+func TestWriterCloseHonorsContextWhileWaitingForWorkers(t *testing.T) {
+	t.Parallel()
+
+	w, err := New(testOptions(t, catalog.NewMemoryCatalog(), newMemorySegmentFactory()))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	w.workersWG.Add(1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := w.Close(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+	w.workersWG.Done()
+	if _, err := w.Close(context.Background()); err != nil {
+		t.Fatalf("retried Close() error = %v", err)
+	}
+}
+
+func TestWriterRejectsStaleEpochOnOpen(t *testing.T) {
+	t.Parallel()
+
+	cat := catalog.NewMemoryCatalog()
+	firstWriter, err := cat.OpenWriter(context.Background(), 1, [16]byte{1})
+	if err != nil {
+		t.Fatalf("OpenWriter(first) error = %v", err)
+	}
+	if _, err := firstWriter.AppendSegment(context.Background(), testCatalogSegment(1, 0, 1, firstWriter.Epoch())); err != nil {
+		t.Fatalf("preload catalog error = %v", err)
+	}
+	secondWriter, err := cat.OpenWriter(context.Background(), 1, [16]byte{2})
+	if err != nil {
+		t.Fatalf("OpenWriter(second) error = %v", err)
+	}
+	if secondWriter.Epoch() <= firstWriter.Epoch() {
+		t.Fatalf("second writer epoch = %d, want > %d", secondWriter.Epoch(), firstWriter.Epoch())
+	}
+
+	opts := DefaultOptions(newMemorySegmentFactory())
+	opts.Session = &sessionStub{
+		snapshot: Snapshot{
+			Head: secondWriter.Head(),
+			Identity: WriterIdentity{
+				Epoch: firstWriter.Epoch(),
+				Tag:   [16]byte{9, 8, 7},
+			},
+		},
+	}
+	opts.Clock = ClockFunc(func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() })
+	opts.UUIDGen = newSequenceUUIDGen()
+	opts.SegmentOptions = newTestSegmentOptions(1)
+	if _, err := New(opts); !errors.Is(err, ErrStaleWriter) {
+		t.Fatalf("New(stale epoch) error = %v, want %v", err, ErrStaleWriter)
+	}
+}
+
+func testOptions(t *testing.T, cat interface {
+	catalog.Reader
+	catalog.WriterManager
+}, factory SinkFactory) Options {
+	t.Helper()
+
+	opts := DefaultOptions(factory)
+	opts.Session = newCatalogSession(t, cat, 1, [16]byte{9, 8, 7})
+	opts.Clock = ClockFunc(func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() })
+	opts.UUIDGen = newSequenceUUIDGen()
+	opts.SegmentOptions = newTestSegmentOptions(1)
+	opts.Queue = QueuePolicy{
+		MaxInflightSegments: 4,
+		MaxInflightBytes:    DefaultMaxInflightBytes,
+	}
+	return opts
+}
+
+func waitForWriterSegmentCount(t *testing.T, w *Writer, want uint64) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if got := w.State().Snapshot.Head.SegmentCount; got >= want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for segment_count >= %d; state=%+v", want, w.State())
+		case <-ticker.C:
+		}
+	}
+}
+
+func testSessionOptions(session Session, factory SinkFactory) Options {
+	opts := DefaultOptions(factory)
+	opts.Session = session
+	opts.Clock = ClockFunc(func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() })
+	opts.UUIDGen = newSequenceUUIDGen()
+	opts.SegmentOptions = newTestSegmentOptions(1)
+	opts.Roll.MaxSegmentRecords = 1
+	opts.Queue = QueuePolicy{
+		MaxInflightSegments: 2,
+		MaxInflightBytes:    DefaultMaxInflightBytes,
+	}
+	return opts
+}
+
+func newTestSegmentOptions(partition uint32) segwriter.Options {
+	opts := segwriter.DefaultOptions(partition)
+	opts.Codec = segformat.CodecNone
+	opts.HashAlgo = segformat.HashXXH64
+	opts.TargetBlockSize = 128
+	opts.PartSize = 128
+	opts.SealParallelism = 1
+	opts.BlockBufferCount = 3
+	opts.UploadParallelism = 1
+	opts.UploadQueueSize = 1
+	return opts
+}
+
+type sessionStub struct {
+	mu        sync.Mutex
+	snapshot  Snapshot
+	publish   func(ctx context.Context, req PublishRequest, current Snapshot) (Snapshot, error)
+	retention func(ctx context.Context, current Snapshot) (RetentionResult, error)
+}
+
+func (s *sessionStub) ApplyPendingRetention(ctx context.Context) (RetentionResult, error) {
+	s.mu.Lock()
+	current := s.snapshot
+	apply := s.retention
+	s.mu.Unlock()
+	if apply == nil {
+		return RetentionResult{}, ErrRetentionUnsupported
+	}
+	result, err := apply(ctx, current)
+	if err != nil {
+		return RetentionResult{}, err
+	}
+	s.mu.Lock()
+	s.snapshot = result.Snapshot
+	s.mu.Unlock()
+	return result, nil
+}
+
+func (s *sessionStub) Snapshot() Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.snapshot
+}
+
+func (s *sessionStub) PublishSegment(ctx context.Context, req PublishRequest) (Snapshot, error) {
+	s.mu.Lock()
+	current := s.snapshot
+	publish := s.publish
+	s.mu.Unlock()
+	if publish == nil {
+		return Snapshot{}, fmt.Errorf("%w: publish not configured", ErrPublishFailed)
+	}
+	next, err := publish(ctx, req, current)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	s.mu.Lock()
+	s.snapshot = next
+	s.mu.Unlock()
+	return next, nil
+}
+
+func newCatalogSession(t testing.TB, cat interface {
+	catalog.Reader
+	catalog.WriterManager
+}, partition uint32, writerTag [16]byte) Session {
+	t.Helper()
+
+	ws, err := cat.OpenWriter(context.Background(), partition, writerTag)
+	if err != nil {
+		t.Fatalf("OpenWriter() error = %v", err)
+	}
+	session := &sessionStub{
+		snapshot: Snapshot{
+			Head: ws.Head(),
+			Identity: WriterIdentity{
+				Epoch: ws.Epoch(),
+				Tag:   writerTag,
+			},
+		},
+		publish: func(ctx context.Context, req PublishRequest, current Snapshot) (Snapshot, error) {
+			state, err := ws.AppendSegment(ctx, req.Segment)
+			if err != nil {
+				if errors.Is(err, catalog.ErrStaleWriter) {
+					return Snapshot{}, fmt.Errorf("%w: %w", ErrStaleWriter, err)
+				}
+				return Snapshot{}, fmt.Errorf("%w: %w", ErrPublishFailed, err)
+			}
+			return Snapshot{
+				Head: state,
+				Identity: WriterIdentity{
+					Epoch: current.Identity.Epoch,
+					Tag:   current.Identity.Tag,
+				},
+			}, nil
+		},
+	}
+	if retention, ok := ws.(catalog.RetentionWriterSession); ok {
+		session.retention = func(ctx context.Context, current Snapshot) (RetentionResult, error) {
+			result, err := retention.ApplyPendingRetention(ctx)
+			if err != nil {
+				if errors.Is(err, catalog.ErrStaleWriter) {
+					return RetentionResult{}, fmt.Errorf("%w: %w", ErrStaleWriter, err)
+				}
+				return RetentionResult{}, err
+			}
+			return RetentionResult{
+				Snapshot:      Snapshot{Head: result.Head, Identity: current.Identity},
+				PolicyVersion: result.Request.PolicyVersion,
+				RequestedLSN:  result.Head.AppliedRetentionLSN,
+				Applied:       result.Applied,
+			}, nil
+		}
+	}
+	return session
+}
+
+type blockingSession struct {
+	mu       sync.Mutex
+	snapshot Snapshot
+	release  chan struct{}
+}
+
+type serializedRetentionSession struct {
+	mu               sync.Mutex
+	snapshot         Snapshot
+	publishEntered   chan struct{}
+	releasePublish   chan struct{}
+	retentionEntered chan struct{}
+	publishOnce      sync.Once
+	retentionOnce    sync.Once
+}
+
+func newSerializedRetentionSession(partition uint32) *serializedRetentionSession {
+	return &serializedRetentionSession{
+		snapshot: Snapshot{
+			Head: pmeta.PartitionHead{Partition: partition, WriterEpoch: 1},
+			Identity: WriterIdentity{
+				Epoch: 1,
+				Tag:   [16]byte{9, 8, 7},
+			},
+		},
+		publishEntered:   make(chan struct{}),
+		releasePublish:   make(chan struct{}),
+		retentionEntered: make(chan struct{}),
+	}
+}
+
+func (s *serializedRetentionSession) Snapshot() Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.snapshot
+}
+
+func (s *serializedRetentionSession) PublishSegment(ctx context.Context, req PublishRequest) (Snapshot, error) {
+	s.publishOnce.Do(func() { close(s.publishEntered) })
+	select {
+	case <-ctx.Done():
+		return Snapshot{}, ctx.Err()
+	case <-s.releasePublish:
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := s.snapshot
+	next.Head.NextLSN = req.Segment.NextLSN()
+	if !next.Head.HasLastSegment {
+		next.Head.OldestLSN = req.Segment.BaseLSN
+	}
+	next.Head.LastSegment = req.Segment
+	next.Head.HasLastSegment = true
+	next.Head.SegmentCount++
+	next.Head.ReachableSegmentCount++
+	s.snapshot = next
+	return next, nil
+}
+
+func (s *serializedRetentionSession) ApplyPendingRetention(context.Context) (RetentionResult, error) {
+	s.retentionOnce.Do(func() { close(s.retentionEntered) })
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := s.snapshot
+	next.Head.AppliedRetentionVersion = 1
+	next.Head.AppliedRetentionLSN = next.Head.OldestLSN
+	s.snapshot = next
+	return RetentionResult{
+		Snapshot:      next,
+		PolicyVersion: 1,
+		RequestedLSN:  next.Head.AppliedRetentionLSN,
+		Applied:       true,
+	}, nil
+}
+
+func newBlockingSession(partition uint32) *blockingSession {
+	return &blockingSession{
+		snapshot: Snapshot{
+			Head: pmeta.PartitionHead{
+				Partition:   partition,
+				WriterEpoch: 1,
+			},
+			Identity: WriterIdentity{
+				Epoch: 1,
+				Tag:   [16]byte{9, 8, 7},
+			},
+		},
+		release: make(chan struct{}, 16),
+	}
+}
+
+func (s *blockingSession) Snapshot() Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.snapshot
+}
+
+func (s *blockingSession) PublishSegment(ctx context.Context, req PublishRequest) (Snapshot, error) {
+	select {
+	case <-ctx.Done():
+		return Snapshot{}, ctx.Err()
+	case <-s.release:
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.snapshot
+	next := Snapshot{
+		Head: pmeta.PartitionHead{
+			Partition:             current.Head.Partition,
+			NextLSN:               req.Segment.NextLSN(),
+			OldestLSN:             current.Head.OldestLSN,
+			WriterEpoch:           current.Identity.Epoch,
+			SegmentCount:          current.Head.SegmentCount + 1,
+			ReachableSegmentCount: current.Head.ReachableSegmentCount + 1,
+			LastSegment:           req.Segment,
+			HasLastSegment:        true,
+		},
+		Identity: current.Identity,
+	}
+	s.snapshot = next
+	return next, nil
+}
+
+func (s *blockingSession) ReleaseOne() {
+	s.release <- struct{}{}
+}
+
+type flakySegmentFactory struct {
+	mu    sync.Mutex
+	next  *memorySegmentFactory
+	calls uint64
+	fail  map[uint64]error
+}
+
+func (f *flakySegmentFactory) NewSegmentSink(ctx context.Context, info SegmentInfo) (segwriter.Sink, error) {
+	f.mu.Lock()
+	call := f.calls
+	f.calls++
+	err := f.fail[call]
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return f.next.NewSegmentSink(ctx, info)
+}
+
+func (f *flakySegmentFactory) Calls() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+func newSequenceUUIDGen() UUIDGen {
+	var n byte
+	return func() ([16]byte, error) {
+		n++
+		return [16]byte{n}, nil
+	}
+}
+
+type memorySegmentFactory struct {
+	mu    sync.Mutex
+	sinks map[string]*segwriter.MemorySink
+}
+
+type blockingWriteSegmentFactory struct {
+	started     chan struct{}
+	release     chan struct{}
+	startedOnce sync.Once
+	releaseOnce sync.Once
+}
+
+func newBlockingWriteSegmentFactory() *blockingWriteSegmentFactory {
+	return &blockingWriteSegmentFactory{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (f *blockingWriteSegmentFactory) NewSegmentSink(_ context.Context, info SegmentInfo) (segwriter.Sink, error) {
+	uri := fmt.Sprintf("memory://blocked/p%08d/%020d-%x", info.Partition, info.BaseLSN, info.SegmentUUID)
+	return &blockingWriteSink{
+		inner:       segwriter.NewMemorySink(uri),
+		started:     f.started,
+		release:     f.release,
+		startedOnce: &f.startedOnce,
+	}, nil
+}
+
+func (f *blockingWriteSegmentFactory) waitForWrite(t *testing.T) {
+	t.Helper()
+	select {
+	case <-f.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for segment write")
+	}
+}
+
+func (f *blockingWriteSegmentFactory) unblock() {
+	f.releaseOnce.Do(func() {
+		close(f.release)
+	})
+}
+
+type blockingWriteSink struct {
+	inner       segwriter.Sink
+	started     chan struct{}
+	release     <-chan struct{}
+	startedOnce *sync.Once
+}
+
+func (s *blockingWriteSink) Begin(ctx context.Context, plan segwriter.Plan) (segwriter.Txn, error) {
+	txn, err := s.inner.Begin(ctx, plan)
+	if err != nil {
+		return nil, err
+	}
+	return &blockingWriteTxn{
+		inner:       txn,
+		started:     s.started,
+		release:     s.release,
+		startedOnce: s.startedOnce,
+	}, nil
+}
+
+type blockingWriteTxn struct {
+	inner       segwriter.Txn
+	started     chan struct{}
+	release     <-chan struct{}
+	startedOnce *sync.Once
+}
+
+func (t *blockingWriteTxn) Write(ctx context.Context, body []byte) error {
+	t.startedOnce.Do(func() {
+		close(t.started)
+	})
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.release:
+		return t.inner.Write(ctx, body)
+	}
+}
+
+func (t *blockingWriteTxn) Commit(ctx context.Context) (segwriter.CommittedObject, error) {
+	return t.inner.Commit(ctx)
+}
+
+func (t *blockingWriteTxn) Abort(ctx context.Context) error {
+	return t.inner.Abort(ctx)
+}
+
+func newMemorySegmentFactory() *memorySegmentFactory {
+	return &memorySegmentFactory{sinks: make(map[string]*segwriter.MemorySink)}
+}
+
+func (f *memorySegmentFactory) NewSegmentSink(_ context.Context, info SegmentInfo) (segwriter.Sink, error) {
+	uri := fmt.Sprintf("memory://p%08d/%020d-%x", info.Partition, info.BaseLSN, info.SegmentUUID)
+	sink := segwriter.NewMemorySink(uri)
+
+	f.mu.Lock()
+	f.sinks[uri] = sink
+	f.mu.Unlock()
+	return sink, nil
+}
+
+func (f *memorySegmentFactory) Bytes(uri string) []byte {
+	f.mu.Lock()
+	sink := f.sinks[uri]
+	f.mu.Unlock()
+	if sink == nil {
+		return nil
+	}
+	return sink.Bytes()
+}
+
+type cleanupAwareSegmentFactory struct {
+	mu    sync.Mutex
+	sinks []*cleanupAwareSegmentSink
+}
+
+func newCleanupAwareSegmentFactory() *cleanupAwareSegmentFactory {
+	return &cleanupAwareSegmentFactory{}
+}
+
+func (f *cleanupAwareSegmentFactory) NewSegmentSink(context.Context, SegmentInfo) (segwriter.Sink, error) {
+	sink := newCleanupAwareSegmentSink()
+	f.mu.Lock()
+	f.sinks = append(f.sinks, sink)
+	f.mu.Unlock()
+	return sink, nil
+}
+
+func (f *cleanupAwareSegmentFactory) firstSink(t *testing.T) *cleanupAwareSegmentSink {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		f.mu.Lock()
+		if len(f.sinks) > 0 {
+			sink := f.sinks[0]
+			f.mu.Unlock()
+			return sink
+		}
+		f.mu.Unlock()
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for segment sink")
+		case <-ticker.C:
+		}
+	}
+}
+
+type cleanupAwareSegmentSink struct {
+	txn *cleanupAwareSegmentTxn
+}
+
+func newCleanupAwareSegmentSink() *cleanupAwareSegmentSink {
+	return &cleanupAwareSegmentSink{
+		txn: &cleanupAwareSegmentTxn{
+			beginStarted: make(chan struct{}),
+			abortCalled:  make(chan struct{}),
+		},
+	}
+}
+
+func (s *cleanupAwareSegmentSink) Begin(context.Context, segwriter.Plan) (segwriter.Txn, error) {
+	s.txn.beginOnce.Do(func() {
+		close(s.txn.beginStarted)
+	})
+	return s.txn, nil
+}
+
+func (s *cleanupAwareSegmentSink) waitBeginStarted(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.txn.beginStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for sink.Begin")
+	}
+}
+
+func (s *cleanupAwareSegmentSink) waitAbort(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.txn.abortCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for txn.Abort")
+	}
+}
+
+func (s *cleanupAwareSegmentSink) abortCtxErr() error {
+	s.txn.mu.Lock()
+	defer s.txn.mu.Unlock()
+	return s.txn.abortErr
+}
+
+type cleanupAwareSegmentTxn struct {
+	mu           sync.Mutex
+	size         uint64
+	beginStarted chan struct{}
+	abortCalled  chan struct{}
+	beginOnce    sync.Once
+	abortOnce    sync.Once
+	abortErr     error
+}
+
+func (t *cleanupAwareSegmentTxn) Write(_ context.Context, bytes []byte) error {
+	t.mu.Lock()
+	t.size += uint64(len(bytes))
+	t.mu.Unlock()
+	return nil
+}
+
+func (t *cleanupAwareSegmentTxn) Commit(context.Context) (segwriter.CommittedObject, error) {
+	t.mu.Lock()
+	size := t.size
+	t.mu.Unlock()
+	return segwriter.CommittedObject{URI: "cleanup://segment", SizeBytes: size, Token: "complete"}, nil
+}
+
+func (t *cleanupAwareSegmentTxn) Abort(ctx context.Context) error {
+	t.mu.Lock()
+	t.abortErr = ctx.Err()
+	t.mu.Unlock()
+	t.abortOnce.Do(func() {
+		close(t.abortCalled)
+	})
+	return nil
+}
+
+func testCatalogSegment(partition uint32, baseLSN uint64, lastLSN uint64, epoch uint64) pmeta.SegmentRef {
+	recordCount := uint32(lastLSN - baseLSN + 1)
+	return pmeta.SegmentRef{
+		URI:              fmt.Sprintf("memory://preloaded/%d-%d", baseLSN, lastLSN),
+		Partition:        partition,
+		WriterEpoch:      epoch,
+		SegmentUUID:      [16]byte{byte(baseLSN + 1), byte(lastLSN + 1), byte(epoch)},
+		WriterTag:        [16]byte{1},
+		BaseLSN:          baseLSN,
+		LastLSN:          lastLSN,
+		MinTimestampMS:   int64(baseLSN),
+		MaxTimestampMS:   int64(lastLSN),
+		RecordCount:      recordCount,
+		BlockCount:       1,
+		SizeBytes:        128,
+		BlockIndexOffset: 64,
+		BlockIndexLength: 64,
+		Codec:            segformat.CodecNone,
+		HashAlgo:         segformat.HashXXH64,
+		SegmentHash:      1,
+		TrailerHash:      2,
+	}
+}
+
+func assertRange(t *testing.T, segment pmeta.SegmentRef, baseLSN uint64, lastLSN uint64) {
+	t.Helper()
+	if segment.BaseLSN != baseLSN || segment.LastLSN != lastLSN {
+		t.Fatalf("segment range = %d-%d, want %d-%d", segment.BaseLSN, segment.LastLSN, baseLSN, lastLSN)
+	}
+}

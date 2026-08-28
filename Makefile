@@ -1,7 +1,7 @@
 GO ?= go
 GOLANGCI_LINT ?= golangci-lint
 
-PACKAGES ?= ./partitionlog/... ./internal/blobstore/...
+PACKAGES ?= ./...
 TESTFLAGS ?=
 FUZZTIME ?= 1m
 STRESSCOUNT ?= 100
@@ -44,20 +44,20 @@ verify: test vet compatibility ## Run the toolchain-only checks required by CI.
 check: verify lint ## Run all local checks, including golangci-lint.
 
 compatibility: ## Verify the committed segment-format compatibility corpus.
-	$(GO) test ./partitionlog/segreader -run '^TestSegmentCompatibilityCorpus$$' -count=1
+	$(GO) test ./segreader -run '^TestSegmentCompatibilityCorpus$$' -count=1
 
 fuzz: fuzz-segformat fuzz-segreader ## Run every fuzz target for FUZZTIME.
 
 fuzz-segformat:
 	@for target in $(FUZZ_SEGFORMAT_TARGETS); do \
 		$(MAKE) --no-print-directory fuzz-one \
-			FUZZ_PACKAGE=./partitionlog/segformat \
+			FUZZ_PACKAGE=./segformat \
 			FUZZ_TARGET=$$target || exit $$?; \
 	done
 
 fuzz-segreader:
 	@$(MAKE) --no-print-directory fuzz-one \
-		FUZZ_PACKAGE=./partitionlog/segreader \
+		FUZZ_PACKAGE=./segreader \
 		FUZZ_TARGET=FuzzOpenAndScanSegment
 
 fuzz-one:
@@ -68,27 +68,27 @@ fuzz-one:
 stress: stress-write stress-read stress-lifecycle ## Run all repeated race and model tests.
 
 stress-write: ## Stress segment publication, fencing, and catalog ordering.
-	$(GO) test -race ./partitionlog/segwriter -run '^TestWriterPipelineStress$$' -count=$(STRESSCOUNT)
-	$(GO) test -race ./partitionlog/catalog -run '^TestMemoryCatalog(IdempotentRetryOfLastAppend|RejectsIdempotentRetryAfterFenceMoves)$$' -count=$(STRESSCOUNT)
-	$(GO) test -race ./partitionlog/catalog/blob -run '^Test(BlobCatalogIdempotentRetryChecksCurrentHead|AppendSegmentReconcilesHistoricalCommitAfterHeadAdvances)$$' -count=$(STRESSCOUNT)
-	$(GO) test -race ./partitionlog/catalog/writeradapter -run '^TestSessionRejectsExpectedNextLSNMismatch$$' -count=$(STRESSCOUNT)
-	$(GO) test -race ./partitionlog/writer -run '^Test(WriterStopsWhenCatalogFenceMoves|WriterCommittedNotifiesAfterPublicationAndOnClose)$$' -count=$(STRESSCOUNT)
-	$(GO) test -race ./partitionlog/catalog -run '^TestMemoryCatalogRejectsSegmentFromDifferentWriterIdentity$$' -count=$(STRESSCOUNT)
-	$(GO) test -race ./partitionlog/catalog/blob -run '^Test(BlobCatalogRejectsSegmentFromDifferentWriterIdentity|BlobCatalogStaleWriterCannotReportRetentionNoOp|BlobCatalogRetentionReconcilesHistoricalCommitAfterFenceMoves|LoadPageRejectsObjectKeyMetadataMismatch)$$' -count=$(STRESSCOUNT)
-	$(GO) test -race ./partitionlog/catalog/blob -run '^TestBlobCatalogMatchesMemoryCatalogAcrossLongHistory$$' -count=$(MODELCOUNT)
+	$(GO) test -race ./segwriter -run '^TestWriterPipelineStress$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./catalog -run '^TestMemoryCatalog(IdempotentRetryOfLastAppend|RejectsIdempotentRetryAfterFenceMoves)$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./catalog/blob -run '^Test(BlobCatalogIdempotentRetryChecksCurrentHead|AppendSegmentReconcilesHistoricalCommitAfterHeadAdvances)$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./catalog/writeradapter -run '^TestSessionRejectsExpectedNextLSNMismatch$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./writer -run '^Test(WriterStopsWhenCatalogFenceMoves|WriterCommittedNotifiesAfterPublicationAndOnClose)$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./catalog -run '^TestMemoryCatalogRejectsSegmentFromDifferentWriterIdentity$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./catalog/blob -run '^Test(BlobCatalogRejectsSegmentFromDifferentWriterIdentity|BlobCatalogStaleWriterCannotReportRetentionNoOp|BlobCatalogRetentionReconcilesHistoricalCommitAfterFenceMoves|LoadPageRejectsObjectKeyMetadataMismatch)$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./catalog/blob -run '^TestBlobCatalogMatchesMemoryCatalogAcrossLongHistory$$' -count=$(MODELCOUNT)
 
 stress-read: ## Stress concurrent segment reads and cache coalescing.
-	$(GO) test -race ./partitionlog/segreader -run '^TestReaderConcurrentScanStress$$' -count=$(STRESSCOUNT)
-	$(GO) test -race ./partitionlog/reader -run '^TestSegmentReaderCacheCoalescesConcurrentOpens$$' -count=$(STRESSCOUNT)
-	$(GO) test -race ./partitionlog/blob/cache -run '^TestStoreCoalescesConcurrentReads$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./segreader -run '^TestReaderConcurrentScanStress$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./reader -run '^TestSegmentReaderCacheCoalescesConcurrentOpens$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./blob/cache -run '^TestStoreCoalescesConcurrentReads$$' -count=$(STRESSCOUNT)
 
 stress-lifecycle: ## Stress lifecycle retry, checkpoint, and scheduling behavior.
-	$(GO) test -race ./partitionlog/blob/lifecycle -run '^Test(ReclaimerResumesAfterDeleteFailureUsingLastObjectKey|ReclaimerRetriesAfterListThrottleWithoutSkippingObjects|ReclaimerRetriesAfterStateCASThrottle|ReclaimerResumesAfterDeleteContextTimeout|ExecuteDeletesUsesBoundedConcurrency|ExecuteDeletesUsesNativeBatchesAndReportsFirstFailureCheckpoint|SchedulerBoundsConcurrencyAndFairlyRequeuesContinuation|SchedulerUsesConfiguredPartitionConcurrency|SchedulerDefersAnUnboundedContinuationAtPassLimit|SchedulerRunTimeoutExhaustsRetryBudget|SchedulerCancellationWaitsForStartedPasses)$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./blob/lifecycle -run '^Test(ReclaimerResumesAfterDeleteFailureUsingLastObjectKey|ReclaimerRetriesAfterListThrottleWithoutSkippingObjects|ReclaimerRetriesAfterStateCASThrottle|ReclaimerResumesAfterDeleteContextTimeout|ExecuteDeletesUsesBoundedConcurrency|ExecuteDeletesUsesNativeBatchesAndReportsFirstFailureCheckpoint|SchedulerBoundsConcurrencyAndFairlyRequeuesContinuation|SchedulerUsesConfiguredPartitionConcurrency|SchedulerDefersAnUnboundedContinuationAtPassLimit|SchedulerRunTimeoutExhaustsRetryBudget|SchedulerCancellationWaitsForStartedPasses)$$' -count=$(STRESSCOUNT)
 	$(GO) test -race ./internal/blobstore/s3 -run '^TestDeleteBatchUsesConfiguredSDKRetryForSlowDown$$' -count=$(STRESSCOUNT)
 
 integration: ## Run live S3, GCS, and Azure lifecycle conformance tests.
-	$(GO) test -race ./partitionlog/s3 ./partitionlog/gcs ./partitionlog/azure -run 'LifecycleConformance$$' -integration -count=1
+	$(GO) test -race ./s3 ./gcs ./azure -run 'LifecycleConformance$$' -integration -count=1
 
-soak: ## Run provider lifecycle soak tests for PARTITIONLOG_LIFECYCLE_SOAK.
-	@if [ -z "$(PARTITIONLOG_LIFECYCLE_SOAK)" ]; then echo "set PARTITIONLOG_LIFECYCLE_SOAK to a duration such as 5m"; exit 1; fi
-	$(GO) test ./partitionlog/s3 ./partitionlog/gcs ./partitionlog/azure -run 'LifecycleSoak$$' -integration -count=1 -timeout=$(SOAKTIMEOUT)
+soak: ## Run provider lifecycle soak tests for OBJLOG_LIFECYCLE_SOAK.
+	@if [ -z "$(OBJLOG_LIFECYCLE_SOAK)" ]; then echo "set OBJLOG_LIFECYCLE_SOAK to a duration such as 5m"; exit 1; fi
+	$(GO) test ./s3 ./gcs ./azure -run 'LifecycleSoak$$' -integration -count=1 -timeout=$(SOAKTIMEOUT)

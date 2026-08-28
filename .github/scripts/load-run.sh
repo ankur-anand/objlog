@@ -21,7 +21,7 @@ out="${PLBENCH_OUT:-results}"
 bin="${PLBENCH_BIN:-bin/plbench}"
 if [ ! -x "$bin" ]; then
   mkdir -p "$(dirname "$bin")"
-  go build -o "$bin" ./partitionlog/internal/cmd/plbench
+  go build -o "$bin" ./internal/cmd/plbench
 fi
 mkdir -p "$out"
 

@@ -1,0 +1,166 @@
+name: objlog
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/objlog.yml"
+      - "go.mod"
+      - "go.sum"
+      - "Makefile"
+      - "**/*.go"
+      - "**/testdata/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/objlog.yml"
+      - "go.mod"
+      - "go.sum"
+      - "Makefile"
+      - "**/*.go"
+      - "**/testdata/**"
+  schedule:
+    - cron: "17 3 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: objlog-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify
+        run: make verify TESTFLAGS=-count=1
+
+  race-stress:
+    name: ${{ matrix.name }} race and stress
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: write path
+            packages: ./segblock ./segformat ./segwriter ./catalog/... ./writer
+            target: stress-write
+            timeout: 45
+          - name: reader
+            packages: ./segreader ./reader ./blob/cache ./blob/source/...
+            target: stress-read
+            timeout: 25
+          - name: lifecycle
+            packages: ./blob/lifecycle ./internal/blobstore/...
+            target: stress-lifecycle
+            timeout: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Race tests
+        run: make race PACKAGES="${{ matrix.packages }}" TESTFLAGS=-count=1
+      - name: Stress tests
+        run: make ${{ matrix.target }}
+
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: ./segformat
+            target: FuzzParseFilePreamble
+          - package: ./segformat
+            target: FuzzParseBlockPreamble
+          - package: ./segformat
+            target: FuzzParseIndexPreamble
+          - package: ./segformat
+            target: FuzzParseBlockIndexEntry
+          - package: ./segformat
+            target: FuzzParseTrailer
+          - package: ./segformat
+            target: FuzzDecodeRawBlock
+          - package: ./segformat
+            target: FuzzParseBlockIndex
+          - package: ./segreader
+            target: FuzzOpenAndScanSegment
+          - package: ./catalog/blob/internal/catformat
+            target: FuzzParseLeafPage
+          - package: ./catalog/blob/internal/catformat
+            target: FuzzParseIndexPage
+          - package: ./catalog/blob/internal/catformat
+            target: FuzzParseHead
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make fuzz-one FUZZ_PACKAGE=${{ matrix.package }} FUZZ_TARGET=${{ matrix.target }} FUZZTIME=10m
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-failure-${{ matrix.target }}
+          path: |
+            segformat/testdata/fuzz
+            segreader/testdata/fuzz
+            catalog/blob/internal/catformat/testdata/fuzz
+          if-no-files-found: ignore
+
+  providers:
+    name: provider integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Start MinIO
+        run: |
+          docker run -d --name objlog-minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+      - name: Start Azurite
+        run: |
+          docker run -d --name objlog-azurite -p 10000:10000 \
+            mcr.microsoft.com/azure-storage/azurite:3.35.0 \
+            azurite-blob --blobHost 0.0.0.0
+      - name: Wait for providers
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null && \
+               curl -sS http://127.0.0.1:10000/devstoreaccount1 >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs objlog-minio
+          docker logs objlog-azurite
+          exit 1
+      - name: Provider lifecycle conformance
+        run: make integration
+      - name: Provider lifecycle soak
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          OBJLOG_LIFECYCLE_SOAK: 5m
+          SOAKTIMEOUT: 10m
+        run: make soak

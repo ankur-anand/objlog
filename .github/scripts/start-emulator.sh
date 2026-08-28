@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Start the emulator a plbench provider needs, or nothing for in-process and
-# real providers. Mirrors the images and versions pinned in partitionlog.yml.
+# real providers. Mirrors the images and versions pinned in objlog.yml.
 set -euo pipefail
 
 provider="${1:?provider}"

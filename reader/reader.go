@@ -1,0 +1,541 @@
+package reader
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math"
+	"time"
+
+	"github.com/ankur-anand/objlog/catalog"
+	"github.com/ankur-anand/objlog/pmeta"
+	"github.com/ankur-anand/objlog/segreader"
+)
+
+func New(cat catalog.Reader, store SegmentStore, opts Options) (*Reader, error) {
+	if cat == nil {
+		return nil, fmt.Errorf("%w: catalog is nil", ErrInvalidOptions)
+	}
+	if store == nil {
+		return nil, fmt.Errorf("%w: segment store is nil", ErrInvalidOptions)
+	}
+	normalized, err := normalizeOptions(opts)
+	if err != nil {
+		return nil, err
+	}
+	return &Reader{
+		catalog: cat,
+		store:   store,
+		opts:    normalized,
+		refresh: newRefreshCoordinator(cat, normalized.Refresh, normalized.MaxCachedPartitionHeads, normalized.Observer),
+		watches: make(map[*Watch]struct{}),
+	}, nil
+}
+
+// Close stops background refresh, closes every Watch, and releases cache
+// entries owned by this Reader. Callers must stop starting foreground reads
+// before Close. It is safe to call more than once.
+func (r *Reader) Close() error {
+	if r == nil {
+		return nil
+	}
+	r.lifecycleMu.Lock()
+	if r.closed {
+		r.lifecycleMu.Unlock()
+		return nil
+	}
+	r.closed = true
+	watches := make([]*Watch, 0, len(r.watches))
+	for watch := range r.watches {
+		watches = append(watches, watch)
+	}
+	r.watches = nil
+	r.lifecycleMu.Unlock()
+
+	var closeErrs []error
+	for _, watch := range watches {
+		if err := watch.Close(); err != nil {
+			closeErrs = append(closeErrs, err)
+		}
+	}
+	r.refresh.close()
+	if r.opts.SegmentCache != nil {
+		r.opts.SegmentCache.Clear()
+	}
+	if cache, ok := r.store.(interface{ ClearRangeCache() }); ok {
+		cache.ClearRangeCache()
+	}
+	return errors.Join(closeErrs...)
+}
+
+func (r *Reader) checkOpen() error {
+	if r == nil {
+		return fmt.Errorf("%w: nil reader", ErrInvalidOptions)
+	}
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
+	if r.closed {
+		return ErrClosed
+	}
+	return nil
+}
+
+func (r *Reader) unregisterWatch(watch *Watch) {
+	if r == nil {
+		return
+	}
+	r.lifecycleMu.Lock()
+	delete(r.watches, watch)
+	r.lifecycleMu.Unlock()
+}
+
+func (r *Reader) Head(ctx context.Context, partition uint32) (pmeta.PartitionHead, error) {
+	return r.Partition(partition).Head(ctx)
+}
+
+func (r *Reader) ConsumeAfter(ctx context.Context, req ConsumeAfterRequest) (ConsumeResult, error) {
+	if req.StartAfterLSN == math.MaxUint64 {
+		return ConsumeResult{}, fmt.Errorf("%w: start_after_lsn=%d", ErrLSNExhausted, req.StartAfterLSN)
+	}
+	return r.Consume(ctx, ConsumeRequest{
+		Partition: req.Partition,
+		StartLSN:  req.StartAfterLSN + 1,
+		Limit:     req.Limit,
+	})
+}
+
+func (r *Reader) Fetch(ctx context.Context, req FetchRequest) (result FetchResult, err error) {
+	start := time.Now()
+	defer func() {
+		records := 0
+		if result.Found {
+			records = 1
+		}
+		r.observe(MetricEvent{
+			Name:      MetricFetch,
+			Partition: req.Partition,
+			StartLSN:  req.LSN,
+			NextLSN:   result.Head.NextLSN,
+			Limit:     1,
+			Records:   records,
+			Duration:  time.Since(start),
+			Err:       err,
+		})
+	}()
+	if err := r.checkOpen(); err != nil {
+		return FetchResult{}, err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		err = ctxErr
+		return FetchResult{}, err
+	}
+	head, err := r.catalog.LoadPartition(ctx, req.Partition)
+	if err != nil {
+		return FetchResult{}, err
+	}
+	result, err = r.fetchFromHead(ctx, head, req)
+	if err == nil {
+		return result, nil
+	}
+	if errors.Is(err, ErrLSNExpired) {
+		return FetchResult{}, err
+	}
+	fresh, retryErr := r.refreshAfterReadAnomaly(ctx, req.Partition, req.LSN, err)
+	if retryErr != nil {
+		return FetchResult{}, retryErr
+	}
+	return r.fetchFromHead(ctx, fresh, req)
+}
+
+func (r *Reader) fetchFromHead(ctx context.Context, head pmeta.PartitionHead, req FetchRequest) (FetchResult, error) {
+	result := FetchResult{Head: head}
+	if req.LSN < head.OldestLSN {
+		return FetchResult{}, LSNExpiredError{
+			Requested: req.LSN,
+			Oldest:    head.OldestLSN,
+			HeadNext:  head.NextLSN,
+		}
+	}
+	if req.LSN >= head.NextLSN {
+		return result, nil
+	}
+	if !head.HasLastSegment {
+		return FetchResult{}, fmt.Errorf("%w: no segment for partition=%d lsn=%d head_next=%d", ErrCorruptData, req.Partition, req.LSN, head.NextLSN)
+	}
+
+	segment, found, err := r.catalog.FindSegment(ctx, req.Partition, req.LSN)
+	if err != nil {
+		return FetchResult{}, err
+	}
+	if !found {
+		return FetchResult{}, fmt.Errorf("%w: no segment for partition=%d lsn=%d head_next=%d", ErrCorruptData, req.Partition, req.LSN, head.NextLSN)
+	}
+	if segment.Partition != req.Partition {
+		return FetchResult{}, fmt.Errorf("%w: segment partition=%d request partition=%d", ErrCorruptData, segment.Partition, req.Partition)
+	}
+	if req.LSN < segment.BaseLSN || req.LSN > segment.LastLSN {
+		return FetchResult{}, fmt.Errorf("%w: segment base_lsn=%d last_lsn=%d does not contain lsn=%d", ErrCorruptData, segment.BaseLSN, segment.LastLSN, req.LSN)
+	}
+
+	records, err := r.readSegment(ctx, segment, req.LSN, 1, head.NextLSN)
+	if err != nil {
+		return FetchResult{}, err
+	}
+	if len(records) == 0 {
+		return FetchResult{}, fmt.Errorf("%w: no record in segment uri=%s lsn=%d", ErrCorruptData, segment.URI, req.LSN)
+	}
+	if records[0].LSN != req.LSN {
+		return FetchResult{}, fmt.Errorf("%w: segment uri=%s returned lsn=%d for requested lsn=%d", ErrCorruptData, segment.URI, records[0].LSN, req.LSN)
+	}
+	result.Record = records[0]
+	result.Found = true
+	return result, nil
+}
+
+func (r *Reader) Consume(ctx context.Context, req ConsumeRequest) (ConsumeResult, error) {
+	start := time.Now()
+	var result ConsumeResult
+	var err error
+	defer func() {
+		r.observe(MetricEvent{
+			Name:      MetricRead,
+			Partition: req.Partition,
+			StartLSN:  req.StartLSN,
+			NextLSN:   result.NextLSN,
+			Limit:     req.Limit,
+			Records:   len(result.Records),
+			Duration:  time.Since(start),
+			Err:       err,
+		})
+	}()
+	if err = r.checkOpen(); err != nil {
+		return ConsumeResult{}, err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		err = ctxErr
+		return ConsumeResult{}, err
+	}
+	if req.Limit < 0 {
+		err = fmt.Errorf("%w: limit=%d", ErrInvalidRequest, req.Limit)
+		return ConsumeResult{}, err
+	}
+	limit := r.normalizedLimit(req.Limit)
+	head, err := r.refresh.headForRead(ctx, req.Partition, req.StartLSN, FreshnessOnTail)
+	if err != nil {
+		return ConsumeResult{}, err
+	}
+	result, err = r.consumeFromHead(ctx, head, req.Partition, req.StartLSN, limit)
+	return result, err
+}
+
+func (r *Reader) consumeWithHead(ctx context.Context, head pmeta.PartitionHead, req ConsumeRequest) (ConsumeResult, error) {
+	if err := ctx.Err(); err != nil {
+		return ConsumeResult{}, err
+	}
+	if req.Limit < 0 {
+		return ConsumeResult{}, fmt.Errorf("%w: limit=%d", ErrInvalidRequest, req.Limit)
+	}
+	if head.Partition != req.Partition {
+		return ConsumeResult{}, fmt.Errorf("%w: head partition=%d request partition=%d", ErrInvalidRequest, head.Partition, req.Partition)
+	}
+	limit := r.normalizedLimit(req.Limit)
+	return r.consumeFromHead(ctx, head, req.Partition, req.StartLSN, limit)
+}
+
+func (r *Reader) ConsumeFromTimestamp(ctx context.Context, req ConsumeFromTimestampRequest) (result ConsumeResult, err error) {
+	start := time.Now()
+	defer func() {
+		r.observe(MetricEvent{
+			Name:      MetricTimestampRead,
+			Partition: req.Partition,
+			NextLSN:   result.NextLSN,
+			Limit:     req.Limit,
+			Records:   len(result.Records),
+			Duration:  time.Since(start),
+			Err:       err,
+		})
+	}()
+	if err := r.checkOpen(); err != nil {
+		return ConsumeResult{}, err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		err = ctxErr
+		return ConsumeResult{}, err
+	}
+	if req.Limit < 0 {
+		return ConsumeResult{}, fmt.Errorf("%w: limit=%d", ErrInvalidRequest, req.Limit)
+	}
+	limit := r.normalizedLimit(req.Limit)
+	result, err = r.consumeFromTimestampLookup(ctx, req, limit)
+	if err == nil {
+		return result, nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return ConsumeResult{}, err
+	}
+	_, refreshErr := r.refresh.refresh(ctx, req.Partition)
+	if refreshErr != nil {
+		return ConsumeResult{}, errors.Join(err, fmt.Errorf("refresh catalog after timestamp read anomaly: %w", refreshErr))
+	}
+	return r.consumeFromTimestampLookup(ctx, req, limit)
+}
+
+func (r *Reader) consumeFromTimestampLookup(ctx context.Context, req ConsumeFromTimestampRequest, limit int) (ConsumeResult, error) {
+	lookup, err := r.catalog.LookupTimestamp(ctx, catalog.TimestampLookupRequest{
+		Partition:   req.Partition,
+		TimestampMS: req.TimestampMS,
+	})
+	if err != nil {
+		return ConsumeResult{}, err
+	}
+	head := lookup.Head
+	result := ConsumeResult{
+		Head:    head,
+		NextLSN: head.NextLSN,
+	}
+	if head.Partition != req.Partition {
+		return ConsumeResult{}, fmt.Errorf("%w: head partition=%d request partition=%d", ErrCorruptData, head.Partition, req.Partition)
+	}
+	if !lookup.Found {
+		return result, nil
+	}
+	segment := lookup.Segment
+	if segment.Partition != req.Partition {
+		return ConsumeResult{}, fmt.Errorf("%w: segment partition=%d request partition=%d", ErrCorruptData, segment.Partition, req.Partition)
+	}
+	if segment.MaxTimestampMS < req.TimestampMS {
+		return ConsumeResult{}, fmt.Errorf("%w: selected segment max_timestamp_ms=%d below requested timestamp_ms=%d", ErrCorruptData, segment.MaxTimestampMS, req.TimestampMS)
+	}
+	if segment.BaseLSN < head.OldestLSN || segment.LastLSN >= head.NextLSN {
+		return ConsumeResult{}, fmt.Errorf("%w: selected segment lsn=%d-%d outside head range=%d-%d", ErrCorruptData, segment.BaseLSN, segment.LastLSN, head.OldestLSN, head.NextLSN)
+	}
+	startLSN, ok, err := r.findTimestampStart(ctx, segment, req.TimestampMS)
+	if err != nil {
+		return ConsumeResult{}, err
+	}
+	if !ok {
+		return ConsumeResult{}, fmt.Errorf("%w: segment uri=%s max_timestamp_ms=%d but no record >= %d", ErrCorruptData, segment.URI, segment.MaxTimestampMS, req.TimestampMS)
+	}
+	return r.consumeFromHeadOnce(ctx, head, req.Partition, startLSN, limit)
+}
+
+func (r *Reader) consumeFromHead(ctx context.Context, head pmeta.PartitionHead, partition uint32, startLSN uint64, limit int) (ConsumeResult, error) {
+	result, err := r.consumeFromHeadOnce(ctx, head, partition, startLSN, limit)
+	if err == nil {
+		return result, nil
+	}
+	if errors.Is(err, ErrLSNExpired) {
+		return ConsumeResult{}, err
+	}
+	fresh, retryErr := r.refreshAfterReadAnomaly(ctx, partition, startLSN, err)
+	if retryErr != nil {
+		return ConsumeResult{}, retryErr
+	}
+	return r.consumeFromHeadOnce(ctx, fresh, partition, startLSN, limit)
+}
+
+func (r *Reader) consumeFromHeadOnce(ctx context.Context, head pmeta.PartitionHead, partition uint32, startLSN uint64, limit int) (ConsumeResult, error) {
+	result := ConsumeResult{
+		Head:    head,
+		NextLSN: startLSN,
+	}
+	if startLSN < head.OldestLSN {
+		return ConsumeResult{}, LSNExpiredError{
+			Requested: startLSN,
+			Oldest:    head.OldestLSN,
+			HeadNext:  head.NextLSN,
+		}
+	}
+	if !head.HasLastSegment {
+		if startLSN < head.NextLSN {
+			return ConsumeResult{}, fmt.Errorf("%w: partition=%d has no last segment for live lsn=%d oldest_lsn=%d next_lsn=%d", ErrCorruptData, partition, startLSN, head.OldestLSN, head.NextLSN)
+		}
+		return result, nil
+	}
+	if startLSN >= head.NextLSN {
+		return result, nil
+	}
+
+	next := startLSN
+	for next < head.NextLSN && len(result.Records) < limit {
+		page, err := r.catalog.ListSegments(ctx, catalog.ListSegmentsRequest{
+			Partition: partition,
+			FromLSN:   next,
+			Limit:     catalog.MaxSegmentPageLimit,
+		})
+		if err != nil {
+			return ConsumeResult{}, err
+		}
+		if len(page.Segments) == 0 {
+			return ConsumeResult{}, fmt.Errorf("%w: no segment for partition=%d lsn=%d head_next=%d", ErrCorruptData, partition, next, head.NextLSN)
+		}
+
+		advanced := false
+		for _, segment := range page.Segments {
+			if len(result.Records) >= limit || next >= head.NextLSN {
+				break
+			}
+			if segment.Partition != partition {
+				return ConsumeResult{}, fmt.Errorf("%w: segment partition=%d request partition=%d", ErrCorruptData, segment.Partition, partition)
+			}
+			if segment.LastLSN < next {
+				continue
+			}
+			if segment.BaseLSN > next {
+				return ConsumeResult{}, fmt.Errorf("%w: gap before segment base_lsn=%d next_lsn=%d", ErrCorruptData, segment.BaseLSN, next)
+			}
+
+			remaining := limit - len(result.Records)
+			records, err := r.readSegment(ctx, segment, next, remaining, head.NextLSN)
+			if err != nil {
+				return ConsumeResult{}, err
+			}
+			if len(records) == 0 {
+				return ConsumeResult{}, fmt.Errorf("%w: no records in segment uri=%s from_lsn=%d", ErrCorruptData, segment.URI, next)
+			}
+			result.Records = append(result.Records, records...)
+			next = result.Records[len(result.Records)-1].LSN + 1
+			result.NextLSN = next
+			advanced = true
+		}
+		if !advanced {
+			return ConsumeResult{}, fmt.Errorf("%w: reader made no progress at lsn=%d", ErrCorruptData, next)
+		}
+	}
+	return result, nil
+}
+
+func (r *Reader) refreshAfterReadAnomaly(ctx context.Context, partition uint32, requested uint64, cause error) (pmeta.PartitionHead, error) {
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
+		return pmeta.PartitionHead{}, cause
+	}
+	head, err := r.refresh.refresh(ctx, partition)
+	if err != nil {
+		return pmeta.PartitionHead{}, errors.Join(cause, fmt.Errorf("refresh retention floor: %w", err))
+	}
+	if requested < head.OldestLSN {
+		return pmeta.PartitionHead{}, LSNExpiredError{
+			Requested: requested,
+			Oldest:    head.OldestLSN,
+			HeadNext:  head.NextLSN,
+		}
+	}
+	return head, nil
+}
+
+func (r *Reader) findTimestampStart(ctx context.Context, segment pmeta.SegmentRef, timestampMS int64) (uint64, bool, error) {
+	sr, err := r.openSegment(ctx, segment)
+	if err != nil {
+		return 0, false, mapSegmentError(err)
+	}
+	startLSN, ok, err := sr.FindLSNByTimestamp(ctx, timestampMS)
+	if err != nil {
+		return 0, false, mapSegmentError(err)
+	}
+	return startLSN, ok, nil
+}
+
+func (r *Reader) readSegment(ctx context.Context, segment pmeta.SegmentRef, fromLSN uint64, limit int, headNextLSN uint64) ([]Record, error) {
+	start := time.Now()
+	var out []Record
+	var err error
+	defer func() {
+		r.observe(MetricEvent{
+			Name:       MetricSegmentRead,
+			Partition:  segment.Partition,
+			StartLSN:   fromLSN,
+			Limit:      limit,
+			Records:    len(out),
+			SegmentURI: segment.URI,
+			Duration:   time.Since(start),
+			Err:        err,
+		})
+	}()
+	sr, err := r.openSegment(ctx, segment)
+	if err != nil {
+		err = mapSegmentError(err)
+		return nil, err
+	}
+	segmentRecords, err := sr.Read(ctx, fromLSN, limit)
+	if err != nil {
+		err = mapSegmentError(err)
+		return nil, err
+	}
+	out = make([]Record, 0, len(segmentRecords))
+	for _, record := range segmentRecords {
+		if record.LSN >= headNextLSN {
+			break
+		}
+		out = append(out, Record{
+			Partition:   record.Partition,
+			LSN:         record.LSN,
+			TimestampMS: record.TimestampMS,
+			Headers:     record.Headers,
+			Value:       record.Value,
+		})
+	}
+	return out, nil
+}
+
+func (r *Reader) openSegment(ctx context.Context, segment pmeta.SegmentRef) (*segreader.Reader, error) {
+	if r.opts.SegmentCache != nil {
+		return r.opts.SegmentCache.Open(ctx, r.store, segment, r.opts.SegmentOptions)
+	}
+	return segreader.Open(ctx, r.store, segment, r.opts.SegmentOptions)
+}
+
+func normalizeOptions(opts Options) (Options, error) {
+	if opts.MaxRecordsPerBatch == 0 {
+		opts.MaxRecordsPerBatch = DefaultMaxRecordsPerBatch
+	}
+	if opts.MaxRecordsPerBatch < 0 {
+		return Options{}, fmt.Errorf("%w: max_records_per_batch=%d", ErrInvalidOptions, opts.MaxRecordsPerBatch)
+	}
+	if opts.MaxCachedPartitionHeads == 0 {
+		opts.MaxCachedPartitionHeads = DefaultMaxCachedPartitionHeads
+	}
+	if opts.MaxCachedPartitionHeads < 0 {
+		return Options{}, fmt.Errorf("%w: max_cached_partition_heads=%d", ErrInvalidOptions, opts.MaxCachedPartitionHeads)
+	}
+	if opts.SegmentOptions == (segreader.Options{}) {
+		opts.SegmentOptions = segreader.DefaultOptions()
+	}
+	return opts, nil
+}
+
+func (r *Reader) normalizedLimit(limit int) int {
+	switch {
+	case limit <= 0:
+		return r.opts.MaxRecordsPerBatch
+	case limit > r.opts.MaxRecordsPerBatch:
+		return r.opts.MaxRecordsPerBatch
+	default:
+		return limit
+	}
+}
+
+func (r *Reader) observe(event MetricEvent) {
+	if r.opts.Observer == nil {
+		return
+	}
+	r.opts.Observer.Observe(event)
+}
+
+func mapSegmentError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if errors.Is(err, segreader.ErrStoreRead) {
+		return fmt.Errorf("%w: %w", ErrStoreRead, err)
+	}
+	if errors.Is(err, segreader.ErrCorruptData) || errors.Is(err, segreader.ErrInvalidSegment) {
+		return fmt.Errorf("%w: %w", ErrCorruptData, err)
+	}
+	if errors.Is(err, segreader.ErrInvalidOptions) {
+		return fmt.Errorf("%w: %w", ErrInvalidOptions, err)
+	}
+	return err
+}
