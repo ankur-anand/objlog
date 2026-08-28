@@ -72,3 +72,22 @@ var (
 	ErrCheckpointMismatch  = plreader.ErrCheckpointMismatch
 	ErrCheckpointAhead     = plreader.ErrCheckpointAhead
 )
+
+// ConsumeRequest reads a bounded batch from one partition by LSN.
+type ConsumeRequest = plreader.ConsumeRequest
+
+// ConsumeAfterRequest reads the batch that follows a known LSN.
+type ConsumeAfterRequest = plreader.ConsumeAfterRequest
+
+// ConsumeFromTimestampRequest seeks a partition by record timestamp and
+// reads forward from the first record at or after it.
+type ConsumeFromTimestampRequest = plreader.ConsumeFromTimestampRequest
+
+// ConsumeResult is returned by the Consume family of reads.
+type ConsumeResult = plreader.ConsumeResult
+
+// FetchRequest reads one record at an exact LSN.
+type FetchRequest = plreader.FetchRequest
+
+// FetchResult is returned by a single-record fetch.
+type FetchResult = plreader.FetchResult

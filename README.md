@@ -6,140 +6,197 @@
   </picture>
 </p>
 
-# Objlog
+# objlog
 
-**Durable timelines for the agentic era.**
+**An append-only log that lives in your object storage bucket.**
 
-Objlog is an object-native event stream store for agents and workflows. It
-keeps each execution as an independently ordered timeline in object storage
-you control.
+objlog is a Go library for durable, partitioned logs stored directly in S3,
+GCS, Azure Blob, or MinIO. A writer seals records into immutable segment
+objects and publishes a small catalog update that makes the new range visible.
+Readers range-read those objects straight from the bucket.
 
-Agents come and go. Their execution history should not.
+There is no broker to operate, no partition to keep resident, and no local disk
+that holds the only copy. The bucket is the log.
 
-## One execution, one timeline
+## Install
 
-An agent run is not only its final output. It is the complete path the work
-took:
-
-```text
-timeline: agent-run-123
-
-0  run started
-1  prompt received
-2  tool called
-3  tool failed
-4  human corrected
-5  output accepted
+```sh
+go get github.com/ankur-anand/objlog
 ```
 
-A timeline is the independently ordered event history of one agent, workflow,
-host, or application. It has a stable identity, dense LSNs, timestamps, and an
-independent lifecycle.
+Go 1.25 or newer.
 
-```text
-Namespace -> Timeline -> Ordered records
+## Quickstart
+
+```go
+import (
+    "github.com/ankur-anand/objlog"
+    objs3 "github.com/ankur-anand/objlog/s3"
+)
+
+store, err := objs3.New(objs3.Options{
+    Client:   s3Client,
+    Bucket:   "events",
+    Prefix:   "prod",
+    StreamID: "hosts/host-a/events",
+})
+
+log, err := objlog.Open(objlog.Options{Store: store})
+defer log.Close()
 ```
 
-One identity. One strict order. One independently replayable history.
+Write. One writer owns one partition:
 
-## Agent systems produce many independent histories
+```go
+w, err := log.OpenWriter(ctx, objlog.WriterOptions{
+    Partition: 7,
+    WriterID:  uuid.New(),
+    Batch: objlog.BatchPolicy{
+        MaxDelay:   time.Second,
+        MaxBytes:   64 << 20,
+        MaxRecords: 16_384,
+    },
+})
 
-Every agent run, workflow, sandbox, host, and edge process creates its own
-history. These histories are bursty and independently owned. Some finish in
-seconds. Some remain active for days. Many are opened only after something
-fails, an evaluation runs, or a past decision needs to be understood.
+appended, err := w.Append(ctx, objlog.Record{
+    TimestampMS: time.Now().UnixMilli(),
+    Value:       []byte("hello"),
+})
 
-A shared broker topic is good at moving events through live systems. Keying
-records by agent preserves that agent's order, but its history remains a sparse
-set of offsets mixed with unrelated work inside a shared partition. Retention,
-consumption, and physical layout still belong to the topic.
-
-Creating one topic per agent restores isolation, but turns every short-lived
-timeline into broker metadata, partitions, replicas, and operational state.
-
-Object storage already provides the durable, elastic foundation this workload
-needs. Objlog adds the missing contract: ordered append, durable visibility,
-replay by position or time, and independent retention.
-
-## Object storage is the durable truth
-
-Writers run close to where work happens. They seal records into immutable,
-indexed segments and publish a small catalog update that makes the new range
-visible. Readers use that catalog to range-read finalized history directly
-from S3, GCS, Azure Blob, or MinIO.
-
-```text
-agent / workflow / host
-          |
-          v
-     append records
-          |
-          v
-immutable segments + catalog
-          |
-          v
-S3 / GCS / Azure Blob / MinIO
-          ^
-          |
-      replay readers
+_, err = w.Flush(ctx)
 ```
 
-An idle timeline has no broker partition or resident writer to keep alive. A
-worker can disappear and another can reconstruct the committed state from
-object storage. Reader caches are disposable. The durable record remains in
-open files rather than in the lifetime of a service deployment.
+`Append` acknowledges local acceptance. Records become visible to readers once
+a segment is cut and published — when `Flush`/`Close` returns, or when the
+batch policy rolls a segment on its own.
 
-## One history, many uses
+Read. Readers never talk to the writer:
 
-When the timeline identity is known, a reader can open only that history:
+```go
+batch, err := log.Reader().Partition(7).Read(ctx, objlog.ReadRequest{
+    StartLSN:  appended.LSN,
+    Limit:     1000,
+    Freshness: objlog.FreshnessOnTail,
+})
 
-```text
-replay agent-run-123 from LSN 900
-inspect workflow-456 after a failure
-audit host-789 between two timestamps
+for _, r := range batch.Records {
+    _ = r.LSN
+    _ = r.Value
+}
 ```
 
-The reader walks bounded catalog metadata and range-reads only the indexed
-segment blocks it needs. It does not call the writer and does not depend on
-other readers.
-
-Cross-timeline queries belong in derived structures built for their access
-patterns:
+## How it works
 
 ```text
-Objlog timelines
+  Append(record)
         |
-        +--> Parquet / Iceberg --> DuckDB / Spark / Trino
-        +--> search index      --> full-text discovery
-        +--> vector index      --> semantic retrieval
-        +--> materialized view --> current state
+        v
+  fenced writer  ---- batches by size, count, or age
+        |
+        v
+  immutable segment object  +  catalog page
+        |
+        v
+  S3  ·  GCS  ·  Azure Blob  ·  MinIO
+        |
+        v
+  readers range-read only the blocks they need
 ```
 
-The timeline preserves exact order and provenance. A projector can reorganize
-many timelines for analytics, search, or serving without becoming the only copy
-of the original history.
+- **One fenced writer per partition.** The catalog fence is the arbiter: a
+  superseded writer is rejected at publication, and it terminates rather than
+  writing behind the new owner.
+- **Dense LSNs.** Every record in a partition gets a gapless LSN and a
+  timestamp. Order within a partition is strict.
+- **Bounded catalog metadata.** Readers page through index references instead
+  of loading a partition's whole history.
+- **Direct reads.** A reader needs the catalog and the object store, nothing
+  else. Caches are disposable; committed state is reconstructible from the
+  bucket.
+- **Immutable segments.** Nothing is rewritten in place — there is no segment
+  rewrite and no event-level compaction. Retention publishes new metadata;
+  objects are only ever added or deleted.
 
-Projectors are part of the product direction. The repository currently focuses
-on the storage engine and direct replay path.
+## Reading
 
-## Where Kafka still fits
+| Need | Call |
+| --- | --- |
+| Replay from an LSN | `log.Reader().Partition(p).Read(ctx, objlog.ReadRequest{...})` |
+| Resumable replay | `Cursor` / `ResumeCursor` with a `CursorCheckpoint` |
+| Seek by wall-clock time | `reader.ConsumeFromTimestamp(ctx, ...)` |
+| One record at an exact LSN | `reader.Fetch(ctx, ...)` |
+| Follow the tail | `reader.Watch(ctx, ...)` and a `Tailer` |
 
-Kafka is the better tool when messages must reach live processors with low
-latency, consumer groups should divide shared work, or applications consume the
-complete stream as events arrive.
+`Freshness` decides when a read refreshes the catalog head: `FreshnessCached`
+uses what is already known, `FreshnessOnTail` refreshes only on reaching the
+cached tail, `FreshnessLatest` refreshes first. Concurrent refreshes of the
+same partition share one catalog load.
 
-Objlog is for histories that must be reopened and governed by identity later.
-They can be used together:
+## Retention and GC
 
-```text
-Kafka     = live distribution
-Objlog    = durable owned history
-Parquet   = cross-timeline analytics
+Logical retention and physical deletion are separate, and both are explicit:
+
+1. `log.RequestRetention(...)` records monotonic intent. Visibility is
+   unchanged.
+2. The active writer applies the latest request through its own fence with
+   `writer.ApplyRetention(...)`, advancing `OldestLSN`. Whole segments are
+   kept, so the effective `OldestLSN` can be lower than the one requested.
+3. `objlog/lifecycle` reclaims the now-unreachable objects after a grace
+   period, under a shared delete rate limit. A slower `OperationScrub` pass
+   finds orphaned segments and catalog pages.
+
+```go
+reclaimer, err := store.NewReclaimer(lifecycle.Options{DeleteDelay: 24 * time.Hour})
+scheduler, err := lifecycle.NewScheduler(reclaimer, lifecycle.SchedulerOptions{})
+summary, err := scheduler.Run(ctx, []lifecycle.Task{
+    {Partition: 7, Operation: lifecycle.OperationReclaim},
+})
 ```
+
+Nothing runs implicitly inside writers or readers. Partition discovery and the
+recurring schedule belong to the caller.
+
+## Providers
+
+| Package | Storage |
+| --- | --- |
+| `objlog/s3` | S3-compatible: AWS S3, MinIO, and friends |
+| `objlog/gcs` | Google Cloud Storage |
+| `objlog/azure` | Azure Blob Storage |
+
+Each provider exposes `New(Options)` and `NewReclaimer(...)`. The whole public
+API is `objlog`, the one provider package you use, and `objlog/lifecycle`.
+
+## Segment format
+
+Segments are a durable contract, not an implementation detail. The v2 format
+covers uncompressed and zstd blocks, CRC32C and XXH64 hashes, block indexes,
+headers, and LSNs above 2^53. A checked-in corpus with a language-neutral
+`manifest.json` lets a reader written in another language verify itself, and
+the Go decoder is fuzzed against the same fixtures.
+
+See [`internal/segformat/COMPATIBILITY.md`](internal/segformat/COMPATIBILITY.md).
+
+## Where a broker still fits
+
+Kafka and friends are the better tool when messages must reach live consumers
+with low latency, when consumer groups should divide shared work, or when the
+whole stream is consumed as it arrives.
+
+objlog is for history that is written once and reopened later: replay,
+reprocessing, audit, and per-partition retention you control. They compose —
+publish to the broker for live delivery, keep the durable history here.
 
 ## Status
 
-Experimental. The Go storage engine supports immutable segment publication,
-fenced writers, bounded catalog metadata, direct replay, retention, and garbage
-collection on S3, GCS, Azure Blob, and MinIO. The service API, registry model,
-and storage layout may still change before the first stable release.
+Experimental. The storage engine runs on S3, GCS, Azure Blob, and MinIO with
+immutable segment publication, fenced writers, bounded catalog metadata,
+direct replay, retention, and garbage collection. The storage layout and the
+Go API may still change before a stable release.
+
+## Docs
+
+- [`docs/usage.md`](docs/usage.md) — the library guide: writers, readers,
+  cursors, tailing, retention, metrics.
+- [`internal/segformat/COMPATIBILITY.md`](internal/segformat/COMPATIBILITY.md)
+  — segment binary format and the cross-language corpus.
