@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/ankur-anand/objlog"
-	"github.com/ankur-anand/objlog/blob/lifecycle"
 	"github.com/ankur-anand/objlog/internal/catalog"
+	"github.com/ankur-anand/objlog/lifecycle"
 )
 
 const SoakEnvironment = "OBJLOG_LIFECYCLE_SOAK"

@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"cloud.google.com/go/storage"
-	"github.com/ankur-anand/objlog/blob/lifecycle"
 	segmentsink "github.com/ankur-anand/objlog/internal/blob/sink"
 	gcssink "github.com/ankur-anand/objlog/internal/blob/sink/gcs"
 	gcssource "github.com/ankur-anand/objlog/internal/blob/source/gcs"
@@ -15,8 +14,10 @@ import (
 	catalogblob "github.com/ankur-anand/objlog/internal/catalog/blob"
 	gcscatalog "github.com/ankur-anand/objlog/internal/catalog/blob/gcs"
 	"github.com/ankur-anand/objlog/internal/keylayout"
+	intlifecycle "github.com/ankur-anand/objlog/internal/lifecycle"
 	"github.com/ankur-anand/objlog/internal/reader"
 	"github.com/ankur-anand/objlog/internal/writer"
+	"github.com/ankur-anand/objlog/lifecycle"
 )
 
 // Options configures a complete GCS-backed objlog store.
@@ -135,7 +136,7 @@ func (s *Store) SegmentStore() reader.SegmentStore {
 func (s *Store) NewReclaimer(opts lifecycle.Options) (*lifecycle.Reclaimer, error) {
 	opts.StreamID = s.streamID
 	opts.CatalogPrefix = s.catalogPrefix
-	return lifecycle.New(s.admin, s.catalog, s.sink.Layout(), opts)
+	return intlifecycle.New(s.admin, s.catalog, s.sink.Layout(), opts)
 }
 
 func rootPrefix(prefix string) string {

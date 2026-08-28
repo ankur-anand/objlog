@@ -21,12 +21,12 @@ import (
 
 	"github.com/ankur-anand/objlog"
 	plazure "github.com/ankur-anand/objlog/azure"
-	"github.com/ankur-anand/objlog/blob/lifecycle"
 	plgcs "github.com/ankur-anand/objlog/gcs"
 	"github.com/ankur-anand/objlog/internal/blobstore"
 	blobazure "github.com/ankur-anand/objlog/internal/blobstore/azure"
 	blobgcs "github.com/ankur-anand/objlog/internal/blobstore/gcs"
 	blobs3 "github.com/ankur-anand/objlog/internal/blobstore/s3"
+	"github.com/ankur-anand/objlog/internal/lifecycle"
 	pls3 "github.com/ankur-anand/objlog/s3"
 )
 

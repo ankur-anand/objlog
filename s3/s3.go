@@ -7,7 +7,6 @@ import (
 	"path"
 	"strings"
 
-	"github.com/ankur-anand/objlog/blob/lifecycle"
 	segmentsink "github.com/ankur-anand/objlog/internal/blob/sink"
 	s3sink "github.com/ankur-anand/objlog/internal/blob/sink/s3"
 	s3source "github.com/ankur-anand/objlog/internal/blob/source/s3"
@@ -15,8 +14,10 @@ import (
 	catalogblob "github.com/ankur-anand/objlog/internal/catalog/blob"
 	s3catalog "github.com/ankur-anand/objlog/internal/catalog/blob/s3"
 	"github.com/ankur-anand/objlog/internal/keylayout"
+	intlifecycle "github.com/ankur-anand/objlog/internal/lifecycle"
 	"github.com/ankur-anand/objlog/internal/reader"
 	"github.com/ankur-anand/objlog/internal/writer"
+	"github.com/ankur-anand/objlog/lifecycle"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
@@ -136,7 +137,7 @@ func (s *Store) SegmentStore() reader.SegmentStore {
 func (s *Store) NewReclaimer(opts lifecycle.Options) (*lifecycle.Reclaimer, error) {
 	opts.StreamID = s.streamID
 	opts.CatalogPrefix = s.catalogPrefix
-	return lifecycle.New(s.admin, s.catalog, s.sink.Layout(), opts)
+	return intlifecycle.New(s.admin, s.catalog, s.sink.Layout(), opts)
 }
 
 func rootPrefix(prefix string) string {

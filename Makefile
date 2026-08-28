@@ -83,7 +83,7 @@ stress-read: ## Stress concurrent segment reads and cache coalescing.
 	$(GO) test -race ./internal/blob/cache -run '^TestStoreCoalescesConcurrentReads$$' -count=$(STRESSCOUNT)
 
 stress-lifecycle: ## Stress lifecycle retry, checkpoint, and scheduling behavior.
-	$(GO) test -race ./blob/lifecycle -run '^Test(ReclaimerResumesAfterDeleteFailureUsingLastObjectKey|ReclaimerRetriesAfterListThrottleWithoutSkippingObjects|ReclaimerRetriesAfterStateCASThrottle|ReclaimerResumesAfterDeleteContextTimeout|ExecuteDeletesUsesBoundedConcurrency|ExecuteDeletesUsesNativeBatchesAndReportsFirstFailureCheckpoint|SchedulerBoundsConcurrencyAndFairlyRequeuesContinuation|SchedulerUsesConfiguredPartitionConcurrency|SchedulerDefersAnUnboundedContinuationAtPassLimit|SchedulerRunTimeoutExhaustsRetryBudget|SchedulerCancellationWaitsForStartedPasses)$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./internal/lifecycle -run '^Test(ReclaimerResumesAfterDeleteFailureUsingLastObjectKey|ReclaimerRetriesAfterListThrottleWithoutSkippingObjects|ReclaimerRetriesAfterStateCASThrottle|ReclaimerResumesAfterDeleteContextTimeout|ExecuteDeletesUsesBoundedConcurrency|ExecuteDeletesUsesNativeBatchesAndReportsFirstFailureCheckpoint|SchedulerBoundsConcurrencyAndFairlyRequeuesContinuation|SchedulerUsesConfiguredPartitionConcurrency|SchedulerDefersAnUnboundedContinuationAtPassLimit|SchedulerRunTimeoutExhaustsRetryBudget|SchedulerCancellationWaitsForStartedPasses)$$' -count=$(STRESSCOUNT)
 	$(GO) test -race ./internal/blobstore/s3 -run '^TestDeleteBatchUsesConfiguredSDKRetryForSlowDown$$' -count=$(STRESSCOUNT)
 
 integration: ## Run live S3, GCS, and Azure lifecycle conformance tests.

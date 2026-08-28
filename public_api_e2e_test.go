@@ -10,9 +10,9 @@ import (
 
 	"github.com/ankur-anand/objlog"
 	plazure "github.com/ankur-anand/objlog/azure"
-	"github.com/ankur-anand/objlog/blob/lifecycle"
 	plgcs "github.com/ankur-anand/objlog/gcs"
 	"github.com/ankur-anand/objlog/internal/catalog"
+	"github.com/ankur-anand/objlog/lifecycle"
 	pls3 "github.com/ankur-anand/objlog/s3"
 )
 

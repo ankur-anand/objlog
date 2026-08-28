@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"github.com/ankur-anand/objlog"
-	plifecycle "github.com/ankur-anand/objlog/blob/lifecycle"
 	"github.com/ankur-anand/objlog/internal/bench"
 	"github.com/ankur-anand/objlog/internal/catalog"
 	catalogblob "github.com/ankur-anand/objlog/internal/catalog/blob"
+	plifecycle "github.com/ankur-anand/objlog/internal/lifecycle"
 	"github.com/ankur-anand/objlog/internal/reader"
 )
 

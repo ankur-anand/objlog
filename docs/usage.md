@@ -24,10 +24,10 @@ import (
     "time"
 
     "github.com/ankur-anand/objlog"
-    pls3 "github.com/ankur-anand/objlog/s3"
+    objs3 "github.com/ankur-anand/objlog/s3"
 )
 
-store, err := pls3.New(pls3.Options{
+store, err := objs3.New(objs3.Options{
     Client:   s3Client,
     Bucket:   "events",
     Prefix:   "prod",
@@ -167,16 +167,16 @@ effective `OldestLSN` can be lower than `result.RequestedLSN`. Physical object
 deletion is a separate grace-period GC operation.
 
 Provider stores expose an explicit reclaimer from
-`objlog/blob/lifecycle`. Run retention cleanup regularly and the more
+`objlog/lifecycle`. Run retention cleanup regularly and the more
 expensive reachability scrub on a slower schedule:
 
 ```go
-deleteLimiter, err := plifecycle.NewTokenBucketDeleteLimiter(10_000, 1_000)
+deleteLimiter, err := lifecycle.NewTokenBucketDeleteLimiter(10_000, 1_000)
 if err != nil {
     return err
 }
 
-reclaimer, err := store.NewReclaimer(plifecycle.Options{
+reclaimer, err := store.NewReclaimer(lifecycle.Options{
     DeleteDelay:       24 * time.Hour,
     MaxPassDuration:   20 * time.Second,
     MaxObjectsPerRun:  10_000,
@@ -189,7 +189,7 @@ if err != nil {
     return err
 }
 
-scheduler, err := plifecycle.NewScheduler(reclaimer, plifecycle.SchedulerOptions{
+scheduler, err := lifecycle.NewScheduler(reclaimer, lifecycle.SchedulerOptions{
     MaxConcurrentPartitions: 8,
     PartitionRunTimeout:     30 * time.Second,
     MaxPassesPerTask:        64,
@@ -198,9 +198,9 @@ if err != nil {
     return err
 }
 
-summary, err := scheduler.Run(ctx, []plifecycle.Task{
-    {Partition: 7, Operation: plifecycle.OperationReclaim},
-    {Partition: 8, Operation: plifecycle.OperationReclaim},
+summary, err := scheduler.Run(ctx, []lifecycle.Task{
+    {Partition: 7, Operation: lifecycle.OperationReclaim},
+    {Partition: 8, Operation: lifecycle.OperationReclaim},
 })
 ```
 

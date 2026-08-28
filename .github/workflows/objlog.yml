@@ -61,7 +61,7 @@ jobs:
             target: stress-read
             timeout: 25
           - name: lifecycle
-            packages: ./blob/lifecycle ./internal/blobstore/...
+            packages: ./internal/lifecycle ./internal/blobstore/...
             target: stress-lifecycle
             timeout: 35
     steps:
