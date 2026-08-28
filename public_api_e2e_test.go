@@ -11,8 +11,8 @@ import (
 	"github.com/ankur-anand/objlog"
 	plazure "github.com/ankur-anand/objlog/azure"
 	"github.com/ankur-anand/objlog/blob/lifecycle"
-	"github.com/ankur-anand/objlog/catalog"
 	plgcs "github.com/ankur-anand/objlog/gcs"
+	"github.com/ankur-anand/objlog/internal/catalog"
 	pls3 "github.com/ankur-anand/objlog/s3"
 )
 

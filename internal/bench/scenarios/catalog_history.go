@@ -10,10 +10,10 @@ import (
 
 	"github.com/ankur-anand/objlog"
 	plifecycle "github.com/ankur-anand/objlog/blob/lifecycle"
-	"github.com/ankur-anand/objlog/catalog"
-	catalogblob "github.com/ankur-anand/objlog/catalog/blob"
 	"github.com/ankur-anand/objlog/internal/bench"
-	"github.com/ankur-anand/objlog/reader"
+	"github.com/ankur-anand/objlog/internal/catalog"
+	catalogblob "github.com/ankur-anand/objlog/internal/catalog/blob"
+	"github.com/ankur-anand/objlog/internal/reader"
 )
 
 func init() { bench.Register(catalogHistory{}) }

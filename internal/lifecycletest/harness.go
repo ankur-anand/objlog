@@ -12,7 +12,7 @@ import (
 
 	"github.com/ankur-anand/objlog"
 	"github.com/ankur-anand/objlog/blob/lifecycle"
-	"github.com/ankur-anand/objlog/catalog"
+	"github.com/ankur-anand/objlog/internal/catalog"
 )
 
 const SoakEnvironment = "OBJLOG_LIFECYCLE_SOAK"

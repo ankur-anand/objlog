@@ -44,20 +44,20 @@ verify: test vet compatibility ## Run the toolchain-only checks required by CI.
 check: verify lint ## Run all local checks, including golangci-lint.
 
 compatibility: ## Verify the committed segment-format compatibility corpus.
-	$(GO) test ./segreader -run '^TestSegmentCompatibilityCorpus$$' -count=1
+	$(GO) test ./internal/segreader -run '^TestSegmentCompatibilityCorpus$$' -count=1
 
 fuzz: fuzz-segformat fuzz-segreader ## Run every fuzz target for FUZZTIME.
 
 fuzz-segformat:
 	@for target in $(FUZZ_SEGFORMAT_TARGETS); do \
 		$(MAKE) --no-print-directory fuzz-one \
-			FUZZ_PACKAGE=./segformat \
+			FUZZ_PACKAGE=./internal/segformat \
 			FUZZ_TARGET=$$target || exit $$?; \
 	done
 
 fuzz-segreader:
 	@$(MAKE) --no-print-directory fuzz-one \
-		FUZZ_PACKAGE=./segreader \
+		FUZZ_PACKAGE=./internal/segreader \
 		FUZZ_TARGET=FuzzOpenAndScanSegment
 
 fuzz-one:
@@ -68,19 +68,19 @@ fuzz-one:
 stress: stress-write stress-read stress-lifecycle ## Run all repeated race and model tests.
 
 stress-write: ## Stress segment publication, fencing, and catalog ordering.
-	$(GO) test -race ./segwriter -run '^TestWriterPipelineStress$$' -count=$(STRESSCOUNT)
-	$(GO) test -race ./catalog -run '^TestMemoryCatalog(IdempotentRetryOfLastAppend|RejectsIdempotentRetryAfterFenceMoves)$$' -count=$(STRESSCOUNT)
-	$(GO) test -race ./catalog/blob -run '^Test(BlobCatalogIdempotentRetryChecksCurrentHead|AppendSegmentReconcilesHistoricalCommitAfterHeadAdvances)$$' -count=$(STRESSCOUNT)
-	$(GO) test -race ./catalog/writeradapter -run '^TestSessionRejectsExpectedNextLSNMismatch$$' -count=$(STRESSCOUNT)
-	$(GO) test -race ./writer -run '^Test(WriterStopsWhenCatalogFenceMoves|WriterCommittedNotifiesAfterPublicationAndOnClose)$$' -count=$(STRESSCOUNT)
-	$(GO) test -race ./catalog -run '^TestMemoryCatalogRejectsSegmentFromDifferentWriterIdentity$$' -count=$(STRESSCOUNT)
-	$(GO) test -race ./catalog/blob -run '^Test(BlobCatalogRejectsSegmentFromDifferentWriterIdentity|BlobCatalogStaleWriterCannotReportRetentionNoOp|BlobCatalogRetentionReconcilesHistoricalCommitAfterFenceMoves|LoadPageRejectsObjectKeyMetadataMismatch)$$' -count=$(STRESSCOUNT)
-	$(GO) test -race ./catalog/blob -run '^TestBlobCatalogMatchesMemoryCatalogAcrossLongHistory$$' -count=$(MODELCOUNT)
+	$(GO) test -race ./internal/segwriter -run '^TestWriterPipelineStress$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./internal/catalog -run '^TestMemoryCatalog(IdempotentRetryOfLastAppend|RejectsIdempotentRetryAfterFenceMoves)$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./internal/catalog/blob -run '^Test(BlobCatalogIdempotentRetryChecksCurrentHead|AppendSegmentReconcilesHistoricalCommitAfterHeadAdvances)$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./internal/catalog/writeradapter -run '^TestSessionRejectsExpectedNextLSNMismatch$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./internal/writer -run '^Test(WriterStopsWhenCatalogFenceMoves|WriterCommittedNotifiesAfterPublicationAndOnClose)$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./internal/catalog -run '^TestMemoryCatalogRejectsSegmentFromDifferentWriterIdentity$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./internal/catalog/blob -run '^Test(BlobCatalogRejectsSegmentFromDifferentWriterIdentity|BlobCatalogStaleWriterCannotReportRetentionNoOp|BlobCatalogRetentionReconcilesHistoricalCommitAfterFenceMoves|LoadPageRejectsObjectKeyMetadataMismatch)$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./internal/catalog/blob -run '^TestBlobCatalogMatchesMemoryCatalogAcrossLongHistory$$' -count=$(MODELCOUNT)
 
 stress-read: ## Stress concurrent segment reads and cache coalescing.
-	$(GO) test -race ./segreader -run '^TestReaderConcurrentScanStress$$' -count=$(STRESSCOUNT)
-	$(GO) test -race ./reader -run '^TestSegmentReaderCacheCoalescesConcurrentOpens$$' -count=$(STRESSCOUNT)
-	$(GO) test -race ./blob/cache -run '^TestStoreCoalescesConcurrentReads$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./internal/segreader -run '^TestReaderConcurrentScanStress$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./internal/reader -run '^TestSegmentReaderCacheCoalescesConcurrentOpens$$' -count=$(STRESSCOUNT)
+	$(GO) test -race ./internal/blob/cache -run '^TestStoreCoalescesConcurrentReads$$' -count=$(STRESSCOUNT)
 
 stress-lifecycle: ## Stress lifecycle retry, checkpoint, and scheduling behavior.
 	$(GO) test -race ./blob/lifecycle -run '^Test(ReclaimerResumesAfterDeleteFailureUsingLastObjectKey|ReclaimerRetriesAfterListThrottleWithoutSkippingObjects|ReclaimerRetriesAfterStateCASThrottle|ReclaimerResumesAfterDeleteContextTimeout|ExecuteDeletesUsesBoundedConcurrency|ExecuteDeletesUsesNativeBatchesAndReportsFirstFailureCheckpoint|SchedulerBoundsConcurrencyAndFairlyRequeuesContinuation|SchedulerUsesConfiguredPartitionConcurrency|SchedulerDefersAnUnboundedContinuationAtPassLimit|SchedulerRunTimeoutExhaustsRetryBudget|SchedulerCancellationWaitsForStartedPasses)$$' -count=$(STRESSCOUNT)

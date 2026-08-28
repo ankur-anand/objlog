@@ -8,12 +8,12 @@ import (
 	"fmt"
 	"time"
 
-	segmentsink "github.com/ankur-anand/objlog/blob/sink"
-	"github.com/ankur-anand/objlog/catalog"
-	catalogblob "github.com/ankur-anand/objlog/catalog/blob"
+	segmentsink "github.com/ankur-anand/objlog/internal/blob/sink"
 	"github.com/ankur-anand/objlog/internal/blobstore"
-	"github.com/ankur-anand/objlog/keylayout"
-	"github.com/ankur-anand/objlog/pmeta"
+	"github.com/ankur-anand/objlog/internal/catalog"
+	catalogblob "github.com/ankur-anand/objlog/internal/catalog/blob"
+	"github.com/ankur-anand/objlog/internal/keylayout"
+	"github.com/ankur-anand/objlog/internal/pmeta"
 )
 
 var (

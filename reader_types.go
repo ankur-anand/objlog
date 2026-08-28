@@ -1,6 +1,6 @@
 package objlog
 
-import plreader "github.com/ankur-anand/objlog/reader"
+import plreader "github.com/ankur-anand/objlog/internal/reader"
 
 // Reader reads committed records from a partition log.
 type Reader = plreader.Reader

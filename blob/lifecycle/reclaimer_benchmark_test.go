@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	segmentsink "github.com/ankur-anand/objlog/blob/sink"
-	catalogblob "github.com/ankur-anand/objlog/catalog/blob"
+	segmentsink "github.com/ankur-anand/objlog/internal/blob/sink"
 	"github.com/ankur-anand/objlog/internal/blobstore"
 	blobmemory "github.com/ankur-anand/objlog/internal/blobstore/memory"
-	plwriter "github.com/ankur-anand/objlog/writer"
+	catalogblob "github.com/ankur-anand/objlog/internal/catalog/blob"
+	plwriter "github.com/ankur-anand/objlog/internal/writer"
 )
 
 func TestReclaimerStartsAtPersistedHighLSN(t *testing.T) {

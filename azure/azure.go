@@ -8,15 +8,15 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/ankur-anand/objlog/blob/lifecycle"
-	segmentsink "github.com/ankur-anand/objlog/blob/sink"
-	azuresink "github.com/ankur-anand/objlog/blob/sink/azure"
-	azuresource "github.com/ankur-anand/objlog/blob/source/azure"
-	"github.com/ankur-anand/objlog/catalog"
-	catalogblob "github.com/ankur-anand/objlog/catalog/blob"
-	azurecatalog "github.com/ankur-anand/objlog/catalog/blob/azure"
-	"github.com/ankur-anand/objlog/keylayout"
-	"github.com/ankur-anand/objlog/reader"
-	"github.com/ankur-anand/objlog/writer"
+	segmentsink "github.com/ankur-anand/objlog/internal/blob/sink"
+	azuresink "github.com/ankur-anand/objlog/internal/blob/sink/azure"
+	azuresource "github.com/ankur-anand/objlog/internal/blob/source/azure"
+	"github.com/ankur-anand/objlog/internal/catalog"
+	catalogblob "github.com/ankur-anand/objlog/internal/catalog/blob"
+	azurecatalog "github.com/ankur-anand/objlog/internal/catalog/blob/azure"
+	"github.com/ankur-anand/objlog/internal/keylayout"
+	"github.com/ankur-anand/objlog/internal/reader"
+	"github.com/ankur-anand/objlog/internal/writer"
 )
 
 // Options configures a complete Azure-backed objlog store.

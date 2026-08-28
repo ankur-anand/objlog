@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	segmentsink "github.com/ankur-anand/objlog/blob/sink"
-	"github.com/ankur-anand/objlog/blob/sink/multipart"
-	"github.com/ankur-anand/objlog/catalog"
-	"github.com/ankur-anand/objlog/writer"
+	segmentsink "github.com/ankur-anand/objlog/internal/blob/sink"
+	"github.com/ankur-anand/objlog/internal/blob/sink/multipart"
+	"github.com/ankur-anand/objlog/internal/catalog"
+	"github.com/ankur-anand/objlog/internal/writer"
 )
 
 func TestLogWriteAndReadWithMemoryStore(t *testing.T) {

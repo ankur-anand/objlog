@@ -3,9 +3,9 @@ package objlog
 import (
 	"time"
 
-	"github.com/ankur-anand/objlog/pmeta"
-	"github.com/ankur-anand/objlog/segformat"
-	"github.com/ankur-anand/objlog/segwriter"
+	"github.com/ankur-anand/objlog/internal/pmeta"
+	"github.com/ankur-anand/objlog/internal/segformat"
+	"github.com/ankur-anand/objlog/internal/segwriter"
 )
 
 // Header is one record header key/value pair.

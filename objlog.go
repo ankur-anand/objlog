@@ -7,13 +7,13 @@ import (
 	"sync"
 	"time"
 
-	blobcache "github.com/ankur-anand/objlog/blob/cache"
-	"github.com/ankur-anand/objlog/catalog"
-	"github.com/ankur-anand/objlog/catalog/writeradapter"
-	"github.com/ankur-anand/objlog/reader"
-	"github.com/ankur-anand/objlog/segformat"
-	"github.com/ankur-anand/objlog/segwriter"
-	lowwriter "github.com/ankur-anand/objlog/writer"
+	blobcache "github.com/ankur-anand/objlog/internal/blob/cache"
+	"github.com/ankur-anand/objlog/internal/catalog"
+	"github.com/ankur-anand/objlog/internal/catalog/writeradapter"
+	"github.com/ankur-anand/objlog/internal/reader"
+	"github.com/ankur-anand/objlog/internal/segformat"
+	"github.com/ankur-anand/objlog/internal/segwriter"
+	lowwriter "github.com/ankur-anand/objlog/internal/writer"
 )
 
 type Clock = lowwriter.Clock

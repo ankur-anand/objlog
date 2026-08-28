@@ -3,8 +3,8 @@ package objlog
 import (
 	"time"
 
-	plreader "github.com/ankur-anand/objlog/reader"
-	plwriter "github.com/ankur-anand/objlog/writer"
+	plreader "github.com/ankur-anand/objlog/internal/reader"
+	plwriter "github.com/ankur-anand/objlog/internal/writer"
 )
 
 // MetricName identifies one observed objlog event.

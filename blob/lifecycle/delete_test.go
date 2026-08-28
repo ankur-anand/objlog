@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	segmentsink "github.com/ankur-anand/objlog/blob/sink"
+	segmentsink "github.com/ankur-anand/objlog/internal/blob/sink"
 	blobmemory "github.com/ankur-anand/objlog/internal/blobstore/memory"
 )
 

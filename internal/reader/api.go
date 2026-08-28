@@ -1,0 +1,873 @@
+package reader
+
+import (
+	"container/list"
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/ankur-anand/objlog/internal/catalog"
+	"github.com/ankur-anand/objlog/internal/pmeta"
+)
+
+const (
+	defaultPollInterval           = time.Second
+	defaultMaxConcurrentRefreshes = 16
+	defaultRefreshTimeout         = 5 * time.Second
+)
+
+var (
+	ErrWatchClosed         = errors.New("objlog/reader: watch closed")
+	ErrPartitionNotWatched = errors.New("objlog/reader: partition not watched")
+)
+
+// Partition returns a passive reader view for one partition.
+func (r *Reader) Partition(partition uint32) *PartitionReader {
+	return &PartitionReader{reader: r, partition: partition}
+}
+
+// Watch starts explicit background catalog refresh for the configured
+// partitions. Close the returned Watch to stop polling.
+func (r *Reader) Watch(ctx context.Context, opts WatchOptions) (*Watch, error) {
+	if r == nil || r.refresh == nil {
+		return nil, fmt.Errorf("%w: nil reader", ErrInvalidOptions)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.lifecycleMu.Lock()
+	if r.closed {
+		r.lifecycleMu.Unlock()
+		return nil, ErrClosed
+	}
+	wctx, cancel := context.WithCancel(ctx)
+	w := &Watch{
+		reader:            r,
+		ctx:               wctx,
+		cancel:            cancel,
+		partitions:        make(map[uint32]struct{}, len(opts.Partitions)),
+		membershipChanged: make(chan struct{}),
+	}
+	for _, partition := range opts.Partitions {
+		if err := w.addPartitionLocked(partition); err != nil {
+			r.lifecycleMu.Unlock()
+			cancel()
+			return nil, err
+		}
+	}
+	r.watches[w] = struct{}{}
+	r.lifecycleMu.Unlock()
+	go func() {
+		<-wctx.Done()
+		_ = w.Close()
+	}()
+	return w, nil
+}
+
+// PartitionReader is a per-partition read view. It is cheap to create and
+// shares the parent Reader runtime, caches, and refresh coordinator.
+type PartitionReader struct {
+	reader    *Reader
+	partition uint32
+}
+
+// Head returns the cached head if available, otherwise it loads the partition
+// head once.
+func (p *PartitionReader) Head(ctx context.Context) (head pmeta.PartitionHead, err error) {
+	start := time.Now()
+	defer func() {
+		p.reader.observe(MetricEvent{
+			Name:      MetricHead,
+			Partition: p.partition,
+			NextLSN:   head.NextLSN,
+			Duration:  time.Since(start),
+			Err:       err,
+		})
+	}()
+	if err := p.reader.checkOpen(); err != nil {
+		return pmeta.PartitionHead{}, err
+	}
+	head, err = p.reader.refresh.head(ctx, p.partition)
+	return head, err
+}
+
+// Read returns a bounded non-blocking batch from committed data. It may refresh
+// the catalog according to req.Freshness, but it never starts background
+// polling and it never waits for future data.
+func (p *PartitionReader) Read(ctx context.Context, req ReadRequest) (result ReadResult, err error) {
+	start := time.Now()
+	defer func() {
+		p.reader.observe(MetricEvent{
+			Name:      MetricRead,
+			Partition: p.partition,
+			StartLSN:  req.StartLSN,
+			NextLSN:   result.NextLSN,
+			Limit:     req.Limit,
+			Records:   len(result.Records),
+			Duration:  time.Since(start),
+			Err:       err,
+		})
+	}()
+	if err := p.reader.checkOpen(); err != nil {
+		return ReadResult{}, err
+	}
+	head, err := p.reader.refresh.headForRead(ctx, p.partition, req.StartLSN, req.Freshness)
+	if err != nil {
+		return ReadResult{}, err
+	}
+	result, err = p.reader.consumeWithHead(ctx, head, ConsumeRequest{
+		Partition: p.partition,
+		StartLSN:  req.StartLSN,
+		Limit:     req.Limit,
+	})
+	return result, err
+}
+
+// Cursor returns a passive replay cursor over this partition.
+func (p *PartitionReader) Cursor(opts CursorOptions) (*Cursor, error) {
+	if err := p.reader.checkOpen(); err != nil {
+		return nil, err
+	}
+	if opts.Limit < 0 {
+		return nil, fmt.Errorf("%w: limit=%d", ErrInvalidRequest, opts.Limit)
+	}
+	return &Cursor{
+		partition: p,
+		nextLSN:   opts.StartLSN,
+		limit:     opts.Limit,
+	}, nil
+}
+
+// ResumeCursor restores a cursor after validating its stream identity,
+// partition, retention floor, and tail against the latest catalog head.
+func (p *PartitionReader) ResumeCursor(ctx context.Context, checkpoint CursorCheckpoint, opts CursorResumeOptions) (*Cursor, error) {
+	if err := p.reader.checkOpen(); err != nil {
+		return nil, err
+	}
+	if opts.Limit < 0 {
+		return nil, fmt.Errorf("%w: limit=%d", ErrInvalidRequest, opts.Limit)
+	}
+	if checkpoint.Version != CursorCheckpointVersion {
+		return nil, fmt.Errorf("%w: version=%d want=%d", ErrCheckpointInvalid, checkpoint.Version, CursorCheckpointVersion)
+	}
+	if checkpoint.Partition != p.partition {
+		return nil, fmt.Errorf("%w: checkpoint partition=%d reader partition=%d", ErrCheckpointMismatch, checkpoint.Partition, p.partition)
+	}
+	head, err := p.reader.refresh.refresh(ctx, p.partition)
+	if err != nil {
+		return nil, err
+	}
+	if head.Partition != p.partition {
+		return nil, fmt.Errorf("%w: head partition=%d reader partition=%d", ErrCorruptData, head.Partition, p.partition)
+	}
+	if checkpoint.StreamID != head.StreamID {
+		return nil, fmt.Errorf("%w: checkpoint stream_id=%q head stream_id=%q", ErrCheckpointMismatch, checkpoint.StreamID, head.StreamID)
+	}
+	if checkpoint.NextLSN < head.OldestLSN {
+		return nil, LSNExpiredError{
+			Requested: checkpoint.NextLSN,
+			Oldest:    head.OldestLSN,
+			HeadNext:  head.NextLSN,
+		}
+	}
+	if checkpoint.NextLSN > head.NextLSN {
+		return nil, fmt.Errorf("%w: checkpoint next_lsn=%d head_next=%d", ErrCheckpointAhead, checkpoint.NextLSN, head.NextLSN)
+	}
+	return &Cursor{
+		partition: p,
+		streamID:  checkpoint.StreamID,
+		bound:     true,
+		nextLSN:   checkpoint.NextLSN,
+		limit:     opts.Limit,
+	}, nil
+}
+
+// Cursor is a passive stateful replay cursor. It is not safe for concurrent
+// use.
+type Cursor struct {
+	partition *PartitionReader
+	streamID  string
+	bound     bool
+	nextLSN   uint64
+	limit     int
+	closed    bool
+}
+
+// Next reads from the current cursor position and advances only when records
+// are returned.
+func (c *Cursor) Next(ctx context.Context) (ReadResult, error) {
+	if c.closed {
+		return ReadResult{}, fmt.Errorf("%w: cursor closed", ErrInvalidRequest)
+	}
+	result, err := c.partition.Read(ctx, ReadRequest{
+		StartLSN:  c.nextLSN,
+		Limit:     c.limit,
+		Freshness: FreshnessOnTail,
+	})
+	if err != nil {
+		return ReadResult{}, err
+	}
+	if err := c.bind(result.Head); err != nil {
+		return ReadResult{}, err
+	}
+	if len(result.Records) > 0 {
+		c.nextLSN = result.NextLSN
+	}
+	return result, nil
+}
+
+// Checkpoint returns a durable next-read position after validating it against
+// the latest catalog head.
+func (c *Cursor) Checkpoint(ctx context.Context) (CursorCheckpoint, error) {
+	if c.closed {
+		return CursorCheckpoint{}, fmt.Errorf("%w: cursor closed", ErrInvalidRequest)
+	}
+	head, err := c.partition.reader.refresh.refresh(ctx, c.partition.partition)
+	if err != nil {
+		return CursorCheckpoint{}, err
+	}
+	if err := c.bind(head); err != nil {
+		return CursorCheckpoint{}, err
+	}
+	if c.nextLSN < head.OldestLSN {
+		return CursorCheckpoint{}, LSNExpiredError{
+			Requested: c.nextLSN,
+			Oldest:    head.OldestLSN,
+			HeadNext:  head.NextLSN,
+		}
+	}
+	if c.nextLSN > head.NextLSN {
+		return CursorCheckpoint{}, fmt.Errorf("%w: cursor next_lsn=%d head_next=%d", ErrCheckpointAhead, c.nextLSN, head.NextLSN)
+	}
+	return CursorCheckpoint{
+		Version:   CursorCheckpointVersion,
+		StreamID:  c.streamID,
+		Partition: c.partition.partition,
+		NextLSN:   c.nextLSN,
+	}, nil
+}
+
+// Seek moves the cursor to lsn.
+func (c *Cursor) Seek(lsn uint64) {
+	c.nextLSN = lsn
+}
+
+// Position returns the next LSN the cursor will try to read.
+func (c *Cursor) Position() uint64 {
+	return c.nextLSN
+}
+
+// Fork returns another cursor with the same position and limit.
+func (c *Cursor) Fork() *Cursor {
+	return &Cursor{
+		partition: c.partition,
+		streamID:  c.streamID,
+		bound:     c.bound,
+		nextLSN:   c.nextLSN,
+		limit:     c.limit,
+	}
+}
+
+// Close marks the cursor closed. It does not close the shared Reader runtime.
+func (c *Cursor) Close() error {
+	c.closed = true
+	return nil
+}
+
+func (c *Cursor) bind(head pmeta.PartitionHead) error {
+	if head.Partition != c.partition.partition {
+		return fmt.Errorf("%w: head partition=%d reader partition=%d", ErrCorruptData, head.Partition, c.partition.partition)
+	}
+	if c.bound && c.streamID != head.StreamID {
+		return fmt.Errorf("%w: cursor stream_id=%q head stream_id=%q", ErrCheckpointMismatch, c.streamID, head.StreamID)
+	}
+	c.streamID = head.StreamID
+	c.bound = true
+	return nil
+}
+
+// Watch owns explicit background refresh for a set of partitions.
+type Watch struct {
+	reader *Reader
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	mu                sync.Mutex
+	closed            bool
+	partitions        map[uint32]struct{}
+	membershipChanged chan struct{}
+}
+
+// AddPartition adds a partition to this Watch's background refresh set.
+func (w *Watch) AddPartition(partition uint32) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return ErrWatchClosed
+	}
+	return w.addPartitionLocked(partition)
+}
+
+// RemovePartition removes a partition from this Watch's background refresh
+// set. A blocked Tailer for the partition returns ErrPartitionNotWatched.
+func (w *Watch) RemovePartition(partition uint32) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, ok := w.partitions[partition]; !ok {
+		return
+	}
+	delete(w.partitions, partition)
+	w.signalMembershipChangedLocked()
+	w.reader.refresh.unwatchPartition(partition)
+}
+
+// Tail returns a blocking tail cursor for a partition already registered with
+// this Watch.
+func (w *Watch) Tail(opts TailOptions) (*Tailer, error) {
+	if opts.Limit < 0 {
+		return nil, fmt.Errorf("%w: limit=%d", ErrInvalidRequest, opts.Limit)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return nil, ErrWatchClosed
+	}
+	if _, ok := w.partitions[opts.Partition]; !ok {
+		return nil, fmt.Errorf("%w: partition %d is not watched", ErrInvalidRequest, opts.Partition)
+	}
+	return &Tailer{
+		watch:     w,
+		partition: opts.Partition,
+		nextLSN:   opts.StartLSN,
+		limit:     opts.Limit,
+	}, nil
+}
+
+// Close stops this Watch's background polling. It does not close the shared
+// Reader runtime.
+func (w *Watch) Close() error {
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return nil
+	}
+	w.closed = true
+	close(w.membershipChanged)
+	partitions := make([]uint32, 0, len(w.partitions))
+	for partition := range w.partitions {
+		partitions = append(partitions, partition)
+	}
+	w.partitions = nil
+	w.mu.Unlock()
+	w.cancel()
+	w.reader.unregisterWatch(w)
+	for _, partition := range partitions {
+		w.reader.refresh.unwatchPartition(partition)
+	}
+	return nil
+}
+
+func (w *Watch) addPartitionLocked(partition uint32) error {
+	if _, ok := w.partitions[partition]; ok {
+		return nil
+	}
+	w.partitions[partition] = struct{}{}
+	w.reader.refresh.watchPartition(partition)
+	return nil
+}
+
+func (w *Watch) signalMembershipChangedLocked() {
+	close(w.membershipChanged)
+	w.membershipChanged = make(chan struct{})
+}
+
+// Tailer is a blocking cursor attached to an explicit Watch. It is not safe for
+// concurrent use.
+type Tailer struct {
+	watch     *Watch
+	partition uint32
+	nextLSN   uint64
+	limit     int
+	closed    bool
+}
+
+// Next returns available records immediately. If the tailer is at the
+// committed tail, it waits until the Watch observes the partition head advance
+// or ctx is cancelled.
+func (t *Tailer) Next(ctx context.Context) (result ReadResult, err error) {
+	start := time.Now()
+	startLSN := t.nextLSN
+	defer func() {
+		t.watch.reader.observe(MetricEvent{
+			Name:      MetricTailNext,
+			Partition: t.partition,
+			StartLSN:  startLSN,
+			NextLSN:   result.NextLSN,
+			Limit:     t.limit,
+			Records:   len(result.Records),
+			Duration:  time.Since(start),
+			Err:       err,
+		})
+	}()
+	if t.closed {
+		return ReadResult{}, fmt.Errorf("%w: tailer closed", ErrInvalidRequest)
+	}
+	partition := t.watch.reader.Partition(t.partition)
+	for {
+		result, err := partition.Read(ctx, ReadRequest{
+			StartLSN:  t.nextLSN,
+			Limit:     t.limit,
+			Freshness: FreshnessOnTail,
+		})
+		if err != nil {
+			return ReadResult{}, err
+		}
+		if len(result.Records) > 0 {
+			t.nextLSN = result.NextLSN
+			return result, nil
+		}
+
+		head, generation, ok := t.watch.reader.refresh.snapshot(t.partition)
+		if ok && head.NextLSN > t.nextLSN {
+			continue
+		}
+		if err := t.watch.waitForAdvance(ctx, t.partition, generation); err != nil {
+			return ReadResult{}, err
+		}
+	}
+}
+
+// Position returns the next LSN the tailer will try to read.
+func (t *Tailer) Position() uint64 {
+	return t.nextLSN
+}
+
+// Close marks the tailer closed. It does not close the Watch.
+func (t *Tailer) Close() error {
+	t.closed = true
+	return nil
+}
+
+func (w *Watch) waitForAdvance(ctx context.Context, partition uint32, generation uint64) error {
+	membershipChanged, err := w.partitionMembership(partition)
+	if err != nil {
+		return err
+	}
+	ch, wait := w.reader.refresh.waitChannel(partition, generation)
+	if !wait {
+		return w.partitionMembershipError(partition)
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-w.ctx.Done():
+		return ErrWatchClosed
+	case <-membershipChanged:
+		return w.partitionMembershipError(partition)
+	case <-ch:
+		return w.partitionMembershipError(partition)
+	}
+}
+
+func (w *Watch) partitionMembership(partition uint32) (<-chan struct{}, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return nil, ErrWatchClosed
+	}
+	if _, ok := w.partitions[partition]; !ok {
+		return nil, ErrPartitionNotWatched
+	}
+	return w.membershipChanged, nil
+}
+
+func (w *Watch) partitionMembershipError(partition uint32) error {
+	_, err := w.partitionMembership(partition)
+	return err
+}
+
+type refreshCoordinator struct {
+	catalog  catalog.Reader
+	policy   RefreshPolicy
+	observer Observer
+	group    loadGroup
+
+	mu                      sync.Mutex
+	cachedHeads             map[uint32]*cachedPartitionHead
+	cachedHeadLRU           list.List
+	maxCachedPartitionHeads int
+	watches                 map[uint32]*partitionState
+	nextGeneration          uint64
+	loopCancel              context.CancelFunc
+	loopDone                chan struct{}
+	closed                  bool
+}
+
+type partitionState struct {
+	head       pmeta.PartitionHead
+	hasHead    bool
+	generation uint64
+	changed    chan struct{}
+	refs       int
+}
+
+type cachedPartitionHead struct {
+	head    pmeta.PartitionHead
+	element *list.Element
+}
+
+type headSnapshot struct {
+	head       pmeta.PartitionHead
+	generation uint64
+}
+
+func newRefreshCoordinator(cat catalog.Reader, policy RefreshPolicy, maxCachedPartitionHeads int, observer Observer) *refreshCoordinator {
+	return &refreshCoordinator{
+		catalog:                 cat,
+		policy:                  normalizeRefreshPolicy(policy, RefreshPolicy{}),
+		observer:                observer,
+		cachedHeads:             make(map[uint32]*cachedPartitionHead),
+		maxCachedPartitionHeads: maxCachedPartitionHeads,
+		watches:                 make(map[uint32]*partitionState),
+	}
+}
+
+func normalizeRefreshPolicy(policy RefreshPolicy, fallback RefreshPolicy) RefreshPolicy {
+	if policy.PollInterval <= 0 {
+		policy.PollInterval = fallback.PollInterval
+	}
+	if policy.PollInterval <= 0 {
+		policy.PollInterval = defaultPollInterval
+	}
+	if policy.MaxConcurrentRefreshes <= 0 {
+		policy.MaxConcurrentRefreshes = fallback.MaxConcurrentRefreshes
+	}
+	if policy.MaxConcurrentRefreshes <= 0 {
+		policy.MaxConcurrentRefreshes = defaultMaxConcurrentRefreshes
+	}
+	if policy.RefreshTimeout <= 0 {
+		policy.RefreshTimeout = fallback.RefreshTimeout
+	}
+	if policy.RefreshTimeout <= 0 {
+		policy.RefreshTimeout = defaultRefreshTimeout
+	}
+	return policy
+}
+
+func (c *refreshCoordinator) head(ctx context.Context, partition uint32) (pmeta.PartitionHead, error) {
+	if head, _, ok := c.snapshot(partition); ok {
+		return head, nil
+	}
+	return c.refresh(ctx, partition)
+}
+
+func (c *refreshCoordinator) headForRead(ctx context.Context, partition uint32, startLSN uint64, freshness Freshness) (pmeta.PartitionHead, error) {
+	switch freshness {
+	case FreshnessDefault:
+		freshness = FreshnessOnTail
+	case FreshnessCached, FreshnessOnTail, FreshnessLatest:
+	default:
+		return pmeta.PartitionHead{}, fmt.Errorf("%w: unknown freshness=%d", ErrInvalidRequest, freshness)
+	}
+
+	head, _, ok := c.snapshot(partition)
+	switch freshness {
+	case FreshnessLatest:
+		return c.refresh(ctx, partition)
+	case FreshnessCached:
+		if ok {
+			return head, nil
+		}
+		return c.refresh(ctx, partition)
+	case FreshnessOnTail:
+		if !ok || startLSN >= head.NextLSN {
+			return c.refresh(ctx, partition)
+		}
+		return head, nil
+	default:
+		panic("unreachable freshness")
+	}
+}
+
+func (c *refreshCoordinator) refresh(ctx context.Context, partition uint32) (pmeta.PartitionHead, error) {
+	if c.isClosed() {
+		return pmeta.PartitionHead{}, ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return pmeta.PartitionHead{}, err
+	}
+	result, err := c.group.Do(ctx, fmt.Sprintf("%d", partition), func(loadCtx context.Context) (any, error) {
+		start := time.Now()
+		var head pmeta.PartitionHead
+		var refreshErr error
+		defer func() {
+			c.observe(MetricEvent{
+				Name:      MetricCatalogRefresh,
+				Partition: partition,
+				NextLSN:   head.NextLSN,
+				Duration:  time.Since(start),
+				Err:       refreshErr,
+			})
+		}()
+		workCtx, cancel := context.WithTimeout(loadCtx, c.policy.RefreshTimeout)
+		defer cancel()
+		head, err := c.catalog.LoadPartition(workCtx, partition)
+		if err != nil {
+			refreshErr = err
+			return headSnapshot{}, err
+		}
+		generation := c.updateHead(partition, head)
+		return headSnapshot{head: head, generation: generation}, nil
+	})
+	if err != nil {
+		return pmeta.PartitionHead{}, err
+	}
+	snapshot := result.(headSnapshot)
+	return snapshot.head, nil
+}
+
+func (c *refreshCoordinator) observe(event MetricEvent) {
+	if c.observer == nil {
+		return
+	}
+	c.observer.Observe(event)
+}
+
+func (c *refreshCoordinator) watchPartition(partition uint32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	state, ok := c.watches[partition]
+	if ok {
+		state.refs++
+	} else {
+		state = &partitionState{
+			changed: make(chan struct{}),
+			refs:    1,
+		}
+		if cached, cachedOK := c.cachedHeads[partition]; cachedOK {
+			state.head = cached.head
+			state.hasHead = true
+			state.generation = c.nextGenerationLocked()
+			c.removeCachedHeadLocked(partition)
+		}
+		c.watches[partition] = state
+	}
+	if c.loopCancel == nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		c.loopCancel = cancel
+		c.loopDone = done
+		go c.loop(ctx, done)
+	}
+}
+
+func (c *refreshCoordinator) unwatchPartition(partition uint32) {
+	var cancel context.CancelFunc
+	var done chan struct{}
+	c.mu.Lock()
+	if state, ok := c.watches[partition]; ok {
+		if state.refs > 1 {
+			state.refs--
+		} else {
+			delete(c.watches, partition)
+			close(state.changed)
+			if state.hasHead {
+				c.cacheHeadLocked(partition, state.head)
+			}
+		}
+	}
+	if len(c.watches) == 0 && c.loopCancel != nil {
+		cancel = c.loopCancel
+		done = c.loopDone
+		c.loopCancel = nil
+		c.loopDone = nil
+	}
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+		<-done
+	}
+}
+
+func (c *refreshCoordinator) loop(ctx context.Context, done chan<- struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(c.policy.PollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.pollWatched(ctx)
+		}
+	}
+}
+
+func (c *refreshCoordinator) pollWatched(ctx context.Context) {
+	partitions := c.snapshotWatched()
+	if len(partitions) == 0 {
+		return
+	}
+	concurrency := c.policy.MaxConcurrentRefreshes
+	if concurrency <= 0 || concurrency > len(partitions) {
+		concurrency = len(partitions)
+	}
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	for _, partition := range partitions {
+		select {
+		case <-ctx.Done():
+			return
+		case sem <- struct{}{}:
+		}
+		wg.Add(1)
+		go func(partition uint32) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			refreshCtx := ctx
+			var cancel context.CancelFunc
+			if c.policy.RefreshTimeout > 0 {
+				refreshCtx, cancel = context.WithTimeout(ctx, c.policy.RefreshTimeout)
+				defer cancel()
+			}
+			_, _ = c.refresh(refreshCtx, partition)
+		}(partition)
+	}
+	wg.Wait()
+}
+
+func (c *refreshCoordinator) snapshotWatched() []uint32 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]uint32, 0, len(c.watches))
+	for partition := range c.watches {
+		out = append(out, partition)
+	}
+	return out
+}
+
+func (c *refreshCoordinator) snapshot(partition uint32) (pmeta.PartitionHead, uint64, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return pmeta.PartitionHead{}, 0, false
+	}
+	if state, ok := c.watches[partition]; ok && state.hasHead {
+		return state.head, state.generation, true
+	}
+	cached, ok := c.cachedHeads[partition]
+	if !ok {
+		return pmeta.PartitionHead{}, 0, false
+	}
+	c.cachedHeadLRU.MoveToFront(cached.element)
+	return cached.head, 0, true
+}
+
+func (c *refreshCoordinator) waitChannel(partition uint32, generation uint64) (<-chan struct{}, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil, false
+	}
+	state, ok := c.watches[partition]
+	if !ok || state.generation != generation {
+		return nil, false
+	}
+	return state.changed, true
+}
+
+func (c *refreshCoordinator) updateHead(partition uint32, head pmeta.PartitionHead) uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return 0
+	}
+	if state, ok := c.watches[partition]; ok {
+		if state.hasHead && state.head == head {
+			return state.generation
+		}
+		state.head = head
+		state.hasHead = true
+		state.generation = c.nextGenerationLocked()
+		close(state.changed)
+		state.changed = make(chan struct{})
+		return state.generation
+	}
+	c.cacheHeadLocked(partition, head)
+	return 0
+}
+
+func (c *refreshCoordinator) cacheHeadLocked(partition uint32, head pmeta.PartitionHead) {
+	if cached, ok := c.cachedHeads[partition]; ok {
+		cached.head = head
+		c.cachedHeadLRU.MoveToFront(cached.element)
+		return
+	}
+	element := c.cachedHeadLRU.PushFront(partition)
+	c.cachedHeads[partition] = &cachedPartitionHead{head: head, element: element}
+	for len(c.cachedHeads) > c.maxCachedPartitionHeads {
+		oldest := c.cachedHeadLRU.Back()
+		if oldest == nil {
+			return
+		}
+		c.removeCachedHeadLocked(oldest.Value.(uint32))
+	}
+}
+
+func (c *refreshCoordinator) removeCachedHeadLocked(partition uint32) {
+	cached, ok := c.cachedHeads[partition]
+	if !ok {
+		return
+	}
+	c.cachedHeadLRU.Remove(cached.element)
+	delete(c.cachedHeads, partition)
+}
+
+func (c *refreshCoordinator) nextGenerationLocked() uint64 {
+	c.nextGeneration++
+	if c.nextGeneration == 0 {
+		c.nextGeneration++
+	}
+	return c.nextGeneration
+}
+
+func (c *refreshCoordinator) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+func (c *refreshCoordinator) close() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	c.closed = true
+	cancel := c.loopCancel
+	done := c.loopDone
+	c.loopCancel = nil
+	c.loopDone = nil
+	for partition, state := range c.watches {
+		delete(c.watches, partition)
+		close(state.changed)
+	}
+	clear(c.cachedHeads)
+	c.cachedHeadLRU.Init()
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	c.group.Close(ErrClosed)
+	if done != nil {
+		<-done
+	}
+}

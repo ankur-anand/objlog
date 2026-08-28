@@ -1,9 +1,9 @@
 package objlog
 
 import (
-	"github.com/ankur-anand/objlog/catalog"
-	"github.com/ankur-anand/objlog/reader"
-	"github.com/ankur-anand/objlog/writer"
+	"github.com/ankur-anand/objlog/internal/catalog"
+	"github.com/ankur-anand/objlog/internal/reader"
+	"github.com/ankur-anand/objlog/internal/writer"
 )
 
 // Store is a complete objlog backend.

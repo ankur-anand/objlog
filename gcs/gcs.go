@@ -8,15 +8,15 @@ import (
 
 	"cloud.google.com/go/storage"
 	"github.com/ankur-anand/objlog/blob/lifecycle"
-	segmentsink "github.com/ankur-anand/objlog/blob/sink"
-	gcssink "github.com/ankur-anand/objlog/blob/sink/gcs"
-	gcssource "github.com/ankur-anand/objlog/blob/source/gcs"
-	"github.com/ankur-anand/objlog/catalog"
-	catalogblob "github.com/ankur-anand/objlog/catalog/blob"
-	gcscatalog "github.com/ankur-anand/objlog/catalog/blob/gcs"
-	"github.com/ankur-anand/objlog/keylayout"
-	"github.com/ankur-anand/objlog/reader"
-	"github.com/ankur-anand/objlog/writer"
+	segmentsink "github.com/ankur-anand/objlog/internal/blob/sink"
+	gcssink "github.com/ankur-anand/objlog/internal/blob/sink/gcs"
+	gcssource "github.com/ankur-anand/objlog/internal/blob/source/gcs"
+	"github.com/ankur-anand/objlog/internal/catalog"
+	catalogblob "github.com/ankur-anand/objlog/internal/catalog/blob"
+	gcscatalog "github.com/ankur-anand/objlog/internal/catalog/blob/gcs"
+	"github.com/ankur-anand/objlog/internal/keylayout"
+	"github.com/ankur-anand/objlog/internal/reader"
+	"github.com/ankur-anand/objlog/internal/writer"
 )
 
 // Options configures a complete GCS-backed objlog store.

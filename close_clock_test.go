@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ankur-anand/objlog/segformat"
+	"github.com/ankur-anand/objlog/internal/segformat"
 )
 
 func TestLogCloseClosesDefaultReader(t *testing.T) {

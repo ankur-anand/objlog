@@ -9,9 +9,9 @@ import (
 	"strings"
 
 	"github.com/ankur-anand/objlog/internal/blobstore"
-	"github.com/ankur-anand/objlog/keylayout"
-	"github.com/ankur-anand/objlog/pmeta"
-	"github.com/ankur-anand/objlog/segformat"
+	"github.com/ankur-anand/objlog/internal/keylayout"
+	"github.com/ankur-anand/objlog/internal/pmeta"
+	"github.com/ankur-anand/objlog/internal/segformat"
 )
 
 // TSBase makes synthetic record timestamps a function of LSN so resumed runs

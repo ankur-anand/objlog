@@ -53,11 +53,11 @@ jobs:
       matrix:
         include:
           - name: write path
-            packages: ./segblock ./segformat ./segwriter ./catalog/... ./writer
+            packages: ./internal/segblock ./internal/segformat ./internal/segwriter ./internal/catalog/... ./internal/writer
             target: stress-write
             timeout: 45
           - name: reader
-            packages: ./segreader ./reader ./blob/cache ./blob/source/...
+            packages: ./internal/segreader ./internal/reader ./internal/blob/cache ./internal/blob/source/...
             target: stress-read
             timeout: 25
           - name: lifecycle
@@ -84,27 +84,27 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - package: ./segformat
+          - package: ./internal/segformat
             target: FuzzParseFilePreamble
-          - package: ./segformat
+          - package: ./internal/segformat
             target: FuzzParseBlockPreamble
-          - package: ./segformat
+          - package: ./internal/segformat
             target: FuzzParseIndexPreamble
-          - package: ./segformat
+          - package: ./internal/segformat
             target: FuzzParseBlockIndexEntry
-          - package: ./segformat
+          - package: ./internal/segformat
             target: FuzzParseTrailer
-          - package: ./segformat
+          - package: ./internal/segformat
             target: FuzzDecodeRawBlock
-          - package: ./segformat
+          - package: ./internal/segformat
             target: FuzzParseBlockIndex
-          - package: ./segreader
+          - package: ./internal/segreader
             target: FuzzOpenAndScanSegment
-          - package: ./catalog/blob/internal/catformat
+          - package: ./internal/catalog/blob/internal/catformat
             target: FuzzParseLeafPage
-          - package: ./catalog/blob/internal/catformat
+          - package: ./internal/catalog/blob/internal/catformat
             target: FuzzParseIndexPage
-          - package: ./catalog/blob/internal/catformat
+          - package: ./internal/catalog/blob/internal/catformat
             target: FuzzParseHead
     steps:
       - uses: actions/checkout@v4
@@ -118,9 +118,9 @@ jobs:
         with:
           name: fuzz-failure-${{ matrix.target }}
           path: |
-            segformat/testdata/fuzz
-            segreader/testdata/fuzz
-            catalog/blob/internal/catformat/testdata/fuzz
+            internal/segformat/testdata/fuzz
+            internal/segreader/testdata/fuzz
+            internal/catalog/blob/internal/catformat/testdata/fuzz
           if-no-files-found: ignore
 
   providers:

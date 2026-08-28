@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	segmentsink "github.com/ankur-anand/objlog/blob/sink"
-	"github.com/ankur-anand/objlog/catalog"
-	catalogblob "github.com/ankur-anand/objlog/catalog/blob"
+	segmentsink "github.com/ankur-anand/objlog/internal/blob/sink"
 	"github.com/ankur-anand/objlog/internal/blobstore"
 	blobmemory "github.com/ankur-anand/objlog/internal/blobstore/memory"
-	"github.com/ankur-anand/objlog/pmeta"
-	plwriter "github.com/ankur-anand/objlog/writer"
+	"github.com/ankur-anand/objlog/internal/catalog"
+	catalogblob "github.com/ankur-anand/objlog/internal/catalog/blob"
+	"github.com/ankur-anand/objlog/internal/pmeta"
+	plwriter "github.com/ankur-anand/objlog/internal/writer"
 )
 
 const testStreamID = "hosts/test/events"

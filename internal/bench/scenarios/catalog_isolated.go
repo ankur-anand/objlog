@@ -6,9 +6,9 @@ import (
 	mrand "math/rand/v2"
 	"time"
 
-	"github.com/ankur-anand/objlog/catalog"
-	catalogblob "github.com/ankur-anand/objlog/catalog/blob"
 	"github.com/ankur-anand/objlog/internal/bench"
+	"github.com/ankur-anand/objlog/internal/catalog"
+	catalogblob "github.com/ankur-anand/objlog/internal/catalog/blob"
 )
 
 func init() { bench.Register(catalogIsolated{}) }
