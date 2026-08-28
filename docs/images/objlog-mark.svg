@@ -1,13 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title description">
-  <title id="title">Objlog folded timeline mark</title>
-  <desc id="description">One continuous timeline folded into a U, ending at its committed tail.</desc>
-  <path
-    d="M32 52h28c12.2 0 22 9.8 22 22v64c0 31.5 20.6 54 46 54s46-22.5 46-54V74c0-12.2 9.8-22 22-22h28"
-    fill="none"
-    stroke="#0b806f"
-    stroke-linecap="round"
-    stroke-linejoin="round"
-    stroke-width="20"
-  />
-  <circle cx="224" cy="52" r="14" fill="#17201e" />
+  <title id="title">Objlog append stack mark</title>
+  <desc id="description">Two sealed segments, a third still being appended, and the head position past its tail.</desc>
+  <g fill="#0b806f">
+    <rect x="44" y="60" width="168" height="28" rx="14" />
+    <rect x="44" y="114" width="168" height="28" rx="14" />
+    <rect x="44" y="168" width="92" height="28" rx="14" />
+    <circle cx="178" cy="182" r="14" />
+  </g>
 </svg>

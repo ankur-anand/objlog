@@ -2,7 +2,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/objlog-mark-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="docs/images/objlog-mark.svg">
-    <img src="docs/images/objlog-mark.svg" alt="Objlog timeline mark" width="112">
+    <img src="docs/images/objlog-mark.svg" alt="objlog append stack mark" width="112">
   </picture>
 </p>
 
