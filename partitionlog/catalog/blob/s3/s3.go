@@ -1,8 +1,8 @@
 package s3
 
 import (
-	"github.com/ankur-anand/unijord/internal/blobstore/s3"
-	"github.com/ankur-anand/unijord/partitionlog/catalog/blob"
+	"github.com/ankur-anand/objlog/internal/blobstore/s3"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/blob"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 )
 

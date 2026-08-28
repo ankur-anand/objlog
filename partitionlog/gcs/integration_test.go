@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ankur-anand/unijord/partitionlog/gcs"
-	"github.com/ankur-anand/unijord/partitionlog/internal/lifecycletest"
+	"github.com/ankur-anand/objlog/partitionlog/gcs"
+	"github.com/ankur-anand/objlog/partitionlog/internal/lifecycletest"
 	"github.com/fsouza/fake-gcs-server/fakestorage"
 )
 

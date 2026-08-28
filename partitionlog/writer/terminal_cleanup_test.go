@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
-	"github.com/ankur-anand/unijord/partitionlog/segwriter"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
+	"github.com/ankur-anand/objlog/partitionlog/segwriter"
 )
 
 func TestWriterPublishFailureAbortsEveryOpenSegmentTransaction(t *testing.T) {

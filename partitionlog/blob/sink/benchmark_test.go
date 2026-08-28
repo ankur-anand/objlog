@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"testing"
 
-	objmultipart "github.com/ankur-anand/unijord/partitionlog/blob/sink/multipart"
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
-	"github.com/ankur-anand/unijord/partitionlog/segwriter"
-	plwriter "github.com/ankur-anand/unijord/partitionlog/writer"
+	objmultipart "github.com/ankur-anand/objlog/partitionlog/blob/sink/multipart"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/partitionlog/segwriter"
+	plwriter "github.com/ankur-anand/objlog/partitionlog/writer"
 )
 
 func BenchmarkSegmentSinkFinish(b *testing.B) {

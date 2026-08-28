@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
 )
 
 func TestWriterAgeAndPolicyCutDetachActiveOnce(t *testing.T) {

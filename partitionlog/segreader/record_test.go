@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
 )
 
 func TestRecordCloneDeepCopiesHeadersAndValue(t *testing.T) {

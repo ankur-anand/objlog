@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ankur-anand/unijord/internal/blobstore"
-	csession "github.com/ankur-anand/unijord/partitionlog/catalog"
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/internal/blobstore"
+	csession "github.com/ankur-anand/objlog/partitionlog/catalog"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
 )
 
 func TestEngineReconcilesLostAppendResponseAndRemainsUsable(t *testing.T) {

@@ -12,10 +12,10 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
-	pcatalog "github.com/ankur-anand/unijord/partitionlog/catalog"
-	"github.com/ankur-anand/unijord/partitionlog/catalog/blob"
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
+	pcatalog "github.com/ankur-anand/objlog/partitionlog/catalog"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/blob"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
 )
 
 const defaultAzuriteConnectionString = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"

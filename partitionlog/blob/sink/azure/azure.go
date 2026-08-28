@@ -13,7 +13,7 @@ import (
 	azblobblob "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
-	"github.com/ankur-anand/unijord/partitionlog/blob/sink/multipart"
+	"github.com/ankur-anand/objlog/partitionlog/blob/sink/multipart"
 )
 
 var limits = multipart.Limits{
@@ -319,7 +319,7 @@ var _ io.ReadSeekCloser = readSeekCloser{}
 func (r readSeekCloser) Close() error { return nil }
 
 func blockID(sessionID string, number int) string {
-	raw := fmt.Sprintf("unijord-%s-%06d", sessionID, number)
+	raw := fmt.Sprintf("objlog-%s-%06d", sessionID, number)
 	return base64.StdEncoding.EncodeToString([]byte(raw))
 }
 

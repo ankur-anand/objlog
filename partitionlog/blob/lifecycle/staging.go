@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	catalogblob "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
+	catalogblob "github.com/ankur-anand/objlog/partitionlog/catalog/blob"
 )
 
 func (r *Reclaimer) reclaimStaging(ctx context.Context, snapshot catalogblob.MaintenanceSnapshot, state *stateFile, token *string, budget *runBudget) error {

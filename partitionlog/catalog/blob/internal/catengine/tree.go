@@ -7,9 +7,9 @@ import (
 	"math"
 	"slices"
 
-	csession "github.com/ankur-anand/unijord/partitionlog/catalog"
-	"github.com/ankur-anand/unijord/partitionlog/catalog/blob/internal/catformat"
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
+	csession "github.com/ankur-anand/objlog/partitionlog/catalog"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/blob/internal/catformat"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
 )
 
 type PageObject struct {

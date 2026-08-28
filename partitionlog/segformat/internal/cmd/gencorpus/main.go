@@ -12,8 +12,8 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
-	"github.com/ankur-anand/unijord/partitionlog/segwriter"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/partitionlog/segwriter"
 )
 
 const corpusSchemaVersion = 1

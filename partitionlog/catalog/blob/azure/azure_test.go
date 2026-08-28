@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
-	"github.com/ankur-anand/unijord/partitionlog/catalog/blob"
-	"github.com/ankur-anand/unijord/partitionlog/catalog/blob/internal/backendtest"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/blob"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/blob/internal/backendtest"
 )
 
 func TestBackendConformanceWithFakeAzure(t *testing.T) {

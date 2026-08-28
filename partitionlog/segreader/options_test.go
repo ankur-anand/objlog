@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
 )
 
 func TestNormalizeOptionsDefaultsMaxBlockBytes(t *testing.T) {

@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	csession "github.com/ankur-anand/unijord/partitionlog/catalog"
-	"github.com/ankur-anand/unijord/partitionlog/catalog/blob/internal/catengine"
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
+	csession "github.com/ankur-anand/objlog/partitionlog/catalog"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/blob/internal/catengine"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
 )
 
 // MaintenanceSnapshot is bounded object-catalog state needed by physical

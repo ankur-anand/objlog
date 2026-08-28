@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ankur-anand/unijord/partitionlog/blob/sink/multipart"
+	"github.com/ankur-anand/objlog/partitionlog/blob/sink/multipart"
 )
 
 func TestMultipartUploadPreservesByteAndReceiptOrder(t *testing.T) {

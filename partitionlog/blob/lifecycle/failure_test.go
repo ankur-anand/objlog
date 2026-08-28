@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ankur-anand/unijord/internal/blobstore"
-	blobmemory "github.com/ankur-anand/unijord/internal/blobstore/memory"
-	segmentsink "github.com/ankur-anand/unijord/partitionlog/blob/sink"
-	catalogblob "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
+	"github.com/ankur-anand/objlog/internal/blobstore"
+	blobmemory "github.com/ankur-anand/objlog/internal/blobstore/memory"
+	segmentsink "github.com/ankur-anand/objlog/partitionlog/blob/sink"
+	catalogblob "github.com/ankur-anand/objlog/partitionlog/catalog/blob"
 )
 
 var errProviderThrottled = errors.New("provider throttled")

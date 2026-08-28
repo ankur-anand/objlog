@@ -5,8 +5,8 @@ import (
 	"fmt"
 
 	"cloud.google.com/go/storage"
-	"github.com/ankur-anand/unijord/partitionlog/blob/source/internal/rangeread"
-	"github.com/ankur-anand/unijord/partitionlog/segreader"
+	"github.com/ankur-anand/objlog/partitionlog/blob/source/internal/rangeread"
+	"github.com/ankur-anand/objlog/partitionlog/segreader"
 )
 
 type Store struct {

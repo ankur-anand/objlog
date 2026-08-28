@@ -1,16 +1,16 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/images/unijord-mark-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/images/unijord-mark.svg">
-    <img src="docs/images/unijord-mark.svg" alt="Unijord timeline mark" width="112">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/objlog-mark-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/images/objlog-mark.svg">
+    <img src="docs/images/objlog-mark.svg" alt="Objlog timeline mark" width="112">
   </picture>
 </p>
 
-# Unijord
+# Objlog
 
 **Durable timelines for the agentic era.**
 
-Unijord is an object-native event stream store for agents and workflows. It
+Objlog is an object-native event stream store for agents and workflows. It
 keeps each execution as an independently ordered timeline in object storage
 you control.
 
@@ -58,7 +58,7 @@ Creating one topic per agent restores isolation, but turns every short-lived
 timeline into broker metadata, partitions, replicas, and operational state.
 
 Object storage already provides the durable, elastic foundation this workload
-needs. Unijord adds the missing contract: ordered append, durable visibility,
+needs. Objlog adds the missing contract: ordered append, durable visibility,
 replay by position or time, and independent retention.
 
 ## Object storage is the durable truth
@@ -107,7 +107,7 @@ Cross-timeline queries belong in derived structures built for their access
 patterns:
 
 ```text
-Unijord timelines
+Objlog timelines
         |
         +--> Parquet / Iceberg --> DuckDB / Spark / Trino
         +--> search index      --> full-text discovery
@@ -128,12 +128,12 @@ Kafka is the better tool when messages must reach live processors with low
 latency, consumer groups should divide shared work, or applications consume the
 complete stream as events arrive.
 
-Unijord is for histories that must be reopened and governed by identity later.
+Objlog is for histories that must be reopened and governed by identity later.
 They can be used together:
 
 ```text
 Kafka     = live distribution
-Unijord   = durable owned history
+Objlog    = durable owned history
 Parquet   = cross-timeline analytics
 ```
 

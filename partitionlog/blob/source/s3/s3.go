@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ankur-anand/unijord/partitionlog/blob/source/internal/rangeread"
-	"github.com/ankur-anand/unijord/partitionlog/segreader"
+	"github.com/ankur-anand/objlog/partitionlog/blob/source/internal/rangeread"
+	"github.com/ankur-anand/objlog/partitionlog/segreader"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 )

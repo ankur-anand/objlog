@@ -2,8 +2,8 @@ package gcs
 
 import (
 	"cloud.google.com/go/storage"
-	blobstoregcs "github.com/ankur-anand/unijord/internal/blobstore/gcs"
-	"github.com/ankur-anand/unijord/partitionlog/catalog/blob"
+	blobstoregcs "github.com/ankur-anand/objlog/internal/blobstore/gcs"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/blob"
 )
 
 type Backend = blobstoregcs.Backend

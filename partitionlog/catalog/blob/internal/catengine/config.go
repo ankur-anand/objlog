@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ankur-anand/unijord/partitionlog/catalog/blob/internal/catformat"
-	"github.com/ankur-anand/unijord/partitionlog/keylayout"
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/blob/internal/catformat"
+	"github.com/ankur-anand/objlog/partitionlog/keylayout"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
 )
 
 const (

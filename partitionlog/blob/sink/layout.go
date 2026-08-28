@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ankur-anand/unijord/partitionlog/keylayout"
-	plwriter "github.com/ankur-anand/unijord/partitionlog/writer"
+	"github.com/ankur-anand/objlog/partitionlog/keylayout"
+	plwriter "github.com/ankur-anand/objlog/partitionlog/writer"
 )
 
 // Layout owns object key naming for partitionlog segment objects and staging

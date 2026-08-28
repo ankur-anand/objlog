@@ -13,7 +13,7 @@ import (
 	azblobblob "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
-	"github.com/ankur-anand/unijord/internal/blobstore"
+	"github.com/ankur-anand/objlog/internal/blobstore"
 )
 
 const maxListResults = 5000

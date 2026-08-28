@@ -5,8 +5,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/ankur-anand/unijord/partitionlog/catalog/blob"
-	"github.com/ankur-anand/unijord/partitionlog/catalog/blob/internal/backendtest"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/blob"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/blob/internal/backendtest"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"

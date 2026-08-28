@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
 )
 
 // Scanner streams records from a single Reader. Scanner is not safe for

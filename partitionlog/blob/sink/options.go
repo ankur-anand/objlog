@@ -3,7 +3,7 @@ package sink
 import (
 	"strings"
 
-	"github.com/ankur-anand/unijord/partitionlog/blob/sink/stream"
+	"github.com/ankur-anand/objlog/partitionlog/blob/sink/stream"
 )
 
 const (

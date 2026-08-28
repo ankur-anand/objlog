@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	blobmemory "github.com/ankur-anand/unijord/internal/blobstore/memory"
-	segmentsink "github.com/ankur-anand/unijord/partitionlog/blob/sink"
+	blobmemory "github.com/ankur-anand/objlog/internal/blobstore/memory"
+	segmentsink "github.com/ankur-anand/objlog/partitionlog/blob/sink"
 )
 
 func TestExecuteDeletesChargesNativeBatchesByObjectCount(t *testing.T) {

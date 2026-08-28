@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	catalogblob "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
+	catalogblob "github.com/ankur-anand/objlog/partitionlog/catalog/blob"
 )
 
 // RunPartition performs bounded lifecycle work for one known partition.

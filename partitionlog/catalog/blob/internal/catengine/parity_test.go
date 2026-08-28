@@ -5,8 +5,8 @@ import (
 	"reflect"
 	"testing"
 
-	csession "github.com/ankur-anand/unijord/partitionlog/catalog"
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
+	csession "github.com/ankur-anand/objlog/partitionlog/catalog"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
 )
 
 func TestEngineMatchesMemoryCatalogSemantics(t *testing.T) {

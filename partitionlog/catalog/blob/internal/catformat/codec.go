@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
 )
 
 func MarshalLeafPage(page LeafPage) ([]byte, [16]byte, error) {

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
 )
 
 const (

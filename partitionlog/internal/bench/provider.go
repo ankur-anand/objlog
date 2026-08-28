@@ -19,15 +19,15 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/fsouza/fake-gcs-server/fakestorage"
 
-	"github.com/ankur-anand/unijord/internal/blobstore"
-	blobazure "github.com/ankur-anand/unijord/internal/blobstore/azure"
-	blobgcs "github.com/ankur-anand/unijord/internal/blobstore/gcs"
-	blobs3 "github.com/ankur-anand/unijord/internal/blobstore/s3"
-	"github.com/ankur-anand/unijord/partitionlog"
-	plazure "github.com/ankur-anand/unijord/partitionlog/azure"
-	"github.com/ankur-anand/unijord/partitionlog/blob/lifecycle"
-	plgcs "github.com/ankur-anand/unijord/partitionlog/gcs"
-	pls3 "github.com/ankur-anand/unijord/partitionlog/s3"
+	"github.com/ankur-anand/objlog/internal/blobstore"
+	blobazure "github.com/ankur-anand/objlog/internal/blobstore/azure"
+	blobgcs "github.com/ankur-anand/objlog/internal/blobstore/gcs"
+	blobs3 "github.com/ankur-anand/objlog/internal/blobstore/s3"
+	"github.com/ankur-anand/objlog/partitionlog"
+	plazure "github.com/ankur-anand/objlog/partitionlog/azure"
+	"github.com/ankur-anand/objlog/partitionlog/blob/lifecycle"
+	plgcs "github.com/ankur-anand/objlog/partitionlog/gcs"
+	pls3 "github.com/ankur-anand/objlog/partitionlog/s3"
 )
 
 // StoreHandle is a complete provider store plus its lifecycle reclaimer

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/ankur-anand/unijord/partitionlog/catalog/blob/internal/catformat"
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/blob/internal/catformat"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
 )
 
 type PageSource interface {

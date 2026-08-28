@@ -6,8 +6,8 @@ import (
 
 	azblobblob "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
-	"github.com/ankur-anand/unijord/partitionlog/blob/source/internal/rangeread"
-	"github.com/ankur-anand/unijord/partitionlog/segreader"
+	"github.com/ankur-anand/objlog/partitionlog/blob/source/internal/rangeread"
+	"github.com/ankur-anand/objlog/partitionlog/segreader"
 )
 
 type Store struct {

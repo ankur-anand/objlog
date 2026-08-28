@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
 	"github.com/cespare/xxhash/v2"
 )
 

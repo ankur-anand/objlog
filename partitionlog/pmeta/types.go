@@ -3,7 +3,7 @@ package pmeta
 import (
 	"fmt"
 
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
 )
 
 const (

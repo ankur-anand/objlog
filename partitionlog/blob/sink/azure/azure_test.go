@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
-	"github.com/ankur-anand/unijord/partitionlog/blob/sink/internal/sinktest"
-	"github.com/ankur-anand/unijord/partitionlog/blob/sink/multipart"
+	"github.com/ankur-anand/objlog/partitionlog/blob/sink/internal/sinktest"
+	"github.com/ankur-anand/objlog/partitionlog/blob/sink/multipart"
 )
 
 func TestStoreMultipartEndToEndWithFakeAzure(t *testing.T) {

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
 )
 
 func TestMemoryCatalogAppendAndLoadPartition(t *testing.T) {

@@ -8,12 +8,12 @@ import (
 	mrand "math/rand/v2"
 	"time"
 
-	"github.com/ankur-anand/unijord/partitionlog"
-	plifecycle "github.com/ankur-anand/unijord/partitionlog/blob/lifecycle"
-	"github.com/ankur-anand/unijord/partitionlog/catalog"
-	catalogblob "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
-	"github.com/ankur-anand/unijord/partitionlog/internal/bench"
-	"github.com/ankur-anand/unijord/partitionlog/reader"
+	"github.com/ankur-anand/objlog/partitionlog"
+	plifecycle "github.com/ankur-anand/objlog/partitionlog/blob/lifecycle"
+	"github.com/ankur-anand/objlog/partitionlog/catalog"
+	catalogblob "github.com/ankur-anand/objlog/partitionlog/catalog/blob"
+	"github.com/ankur-anand/objlog/partitionlog/internal/bench"
+	"github.com/ankur-anand/objlog/partitionlog/reader"
 )
 
 func init() { bench.Register(catalogHistory{}) }

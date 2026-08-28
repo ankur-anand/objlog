@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/ankur-anand/unijord/partitionlog/catalog"
-	"github.com/ankur-anand/unijord/partitionlog/writer"
+	"github.com/ankur-anand/objlog/partitionlog/catalog"
+	"github.com/ankur-anand/objlog/partitionlog/writer"
 )
 
 // Session adapts a fenced catalog.WriterSession into writer.Session.

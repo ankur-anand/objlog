@@ -2,8 +2,8 @@ package azure
 
 import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
-	blobstoreazure "github.com/ankur-anand/unijord/internal/blobstore/azure"
-	"github.com/ankur-anand/unijord/partitionlog/catalog/blob"
+	blobstoreazure "github.com/ankur-anand/objlog/internal/blobstore/azure"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/blob"
 )
 
 type Backend = blobstoreazure.Backend

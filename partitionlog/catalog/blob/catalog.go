@@ -3,9 +3,9 @@ package blob
 import (
 	"fmt"
 
-	csession "github.com/ankur-anand/unijord/partitionlog/catalog"
-	"github.com/ankur-anand/unijord/partitionlog/catalog/blob/internal/catengine"
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
+	csession "github.com/ankur-anand/objlog/partitionlog/catalog"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/blob/internal/catengine"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
 )
 
 type Catalog struct {

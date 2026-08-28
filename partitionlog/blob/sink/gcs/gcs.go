@@ -10,7 +10,7 @@ import (
 	"sync"
 
 	"cloud.google.com/go/storage"
-	"github.com/ankur-anand/unijord/partitionlog/blob/sink/multipart"
+	"github.com/ankur-anand/objlog/partitionlog/blob/sink/multipart"
 	"github.com/google/uuid"
 	"google.golang.org/api/googleapi"
 )
@@ -148,8 +148,8 @@ func (u *session) uploadPartAttempt(ctx context.Context, part multipart.Part) (m
 	w := obj.NewWriter(ctx)
 	w.ContentType = u.opts.ContentType
 	w.Metadata = multipart.SessionMetadata(u.opts)
-	w.Metadata["unijord-part-number"] = strconv.Itoa(part.Number)
-	w.Metadata["unijord-part-sha256"] = fmt.Sprintf("%x", part.ChecksumSHA256)
+	w.Metadata["objlog-part-number"] = strconv.Itoa(part.Number)
+	w.Metadata["objlog-part-sha256"] = fmt.Sprintf("%x", part.ChecksumSHA256)
 	if _, err := bytes.NewReader(part.Bytes).WriteTo(w); err != nil {
 		_ = w.Close()
 		return multipart.Receipt{}, gcsObject{}, mapError(err)

@@ -6,7 +6,7 @@ import (
 	"slices"
 	"testing"
 
-	pcatalog "github.com/ankur-anand/unijord/partitionlog/catalog"
+	pcatalog "github.com/ankur-anand/objlog/partitionlog/catalog"
 )
 
 func TestIsPageReachableDistinguishesSupersededIndexCandidate(t *testing.T) {

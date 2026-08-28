@@ -7,7 +7,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
 )
 
 // MemoryCatalog is an in-process catalog implementation. It is intended for

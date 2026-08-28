@@ -9,13 +9,13 @@ import (
 	"testing"
 	"time"
 
-	objmultipart "github.com/ankur-anand/unijord/partitionlog/blob/sink/multipart"
-	uploadstream "github.com/ankur-anand/unijord/partitionlog/blob/sink/stream"
-	pcatalog "github.com/ankur-anand/unijord/partitionlog/catalog"
-	"github.com/ankur-anand/unijord/partitionlog/catalog/blob"
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
-	"github.com/ankur-anand/unijord/partitionlog/segwriter"
-	plwriter "github.com/ankur-anand/unijord/partitionlog/writer"
+	objmultipart "github.com/ankur-anand/objlog/partitionlog/blob/sink/multipart"
+	uploadstream "github.com/ankur-anand/objlog/partitionlog/blob/sink/stream"
+	pcatalog "github.com/ankur-anand/objlog/partitionlog/catalog"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/blob"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/partitionlog/segwriter"
+	plwriter "github.com/ankur-anand/objlog/partitionlog/writer"
 )
 
 func TestBlobWriterEndToEndWithBlobCatalog(t *testing.T) {

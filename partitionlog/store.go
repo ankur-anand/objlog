@@ -1,9 +1,9 @@
 package partitionlog
 
 import (
-	"github.com/ankur-anand/unijord/partitionlog/catalog"
-	"github.com/ankur-anand/unijord/partitionlog/reader"
-	"github.com/ankur-anand/unijord/partitionlog/writer"
+	"github.com/ankur-anand/objlog/partitionlog/catalog"
+	"github.com/ankur-anand/objlog/partitionlog/reader"
+	"github.com/ankur-anand/objlog/partitionlog/writer"
 )
 
 // Store is a complete partitionlog backend.

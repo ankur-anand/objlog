@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
 )
 
 func TestWriterTreatsSinkContractViolationAsTerminal(t *testing.T) {

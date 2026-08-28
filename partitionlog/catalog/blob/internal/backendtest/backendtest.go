@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/ankur-anand/unijord/partitionlog/catalog/blob"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/blob"
 )
 
 type Config struct {

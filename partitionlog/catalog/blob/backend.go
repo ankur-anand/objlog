@@ -3,7 +3,7 @@ package blob
 import (
 	"errors"
 
-	"github.com/ankur-anand/unijord/internal/blobstore"
+	"github.com/ankur-anand/objlog/internal/blobstore"
 )
 
 var (

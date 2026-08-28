@@ -1,5 +1,5 @@
 // Package blobstore defines the conditional object operations shared by
-// Unijord metadata services.
+// Objlog metadata services.
 package blobstore
 
 import (

@@ -19,9 +19,9 @@ const (
 
 	// Azure metadata names must be identifiers, so the shared names use only
 	// ASCII letters and underscores accepted by every provider.
-	MetadataSessionID = "unijord_upload_session"
-	MetadataSize      = "unijord_object_size"
-	MetadataSHA256    = "unijord_object_sha256"
+	MetadataSessionID = "objlog_upload_session"
+	MetadataSize      = "objlog_object_size"
+	MetadataSHA256    = "objlog_object_sha256"
 )
 
 var (

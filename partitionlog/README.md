@@ -23,8 +23,8 @@ import (
     "context"
     "time"
 
-    "github.com/ankur-anand/unijord/partitionlog"
-    pls3 "github.com/ankur-anand/unijord/partitionlog/s3"
+    "github.com/ankur-anand/objlog/partitionlog"
+    pls3 "github.com/ankur-anand/objlog/partitionlog/s3"
 )
 
 store, err := pls3.New(pls3.Options{

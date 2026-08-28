@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ankur-anand/unijord/partitionlog"
-	"github.com/ankur-anand/unijord/partitionlog/blob/lifecycle"
-	"github.com/ankur-anand/unijord/partitionlog/catalog"
+	"github.com/ankur-anand/objlog/partitionlog"
+	"github.com/ankur-anand/objlog/partitionlog/blob/lifecycle"
+	"github.com/ankur-anand/objlog/partitionlog/catalog"
 )
 
 const SoakEnvironment = "PARTITIONLOG_LIFECYCLE_SOAK"

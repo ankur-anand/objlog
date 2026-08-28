@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ankur-anand/unijord/partitionlog"
-	plazure "github.com/ankur-anand/unijord/partitionlog/azure"
-	"github.com/ankur-anand/unijord/partitionlog/blob/lifecycle"
-	"github.com/ankur-anand/unijord/partitionlog/catalog"
-	plgcs "github.com/ankur-anand/unijord/partitionlog/gcs"
-	pls3 "github.com/ankur-anand/unijord/partitionlog/s3"
+	"github.com/ankur-anand/objlog/partitionlog"
+	plazure "github.com/ankur-anand/objlog/partitionlog/azure"
+	"github.com/ankur-anand/objlog/partitionlog/blob/lifecycle"
+	"github.com/ankur-anand/objlog/partitionlog/catalog"
+	plgcs "github.com/ankur-anand/objlog/partitionlog/gcs"
+	pls3 "github.com/ankur-anand/objlog/partitionlog/s3"
 )
 
 func TestPublicAPIEndToEndAcrossBlobStores(t *testing.T) {

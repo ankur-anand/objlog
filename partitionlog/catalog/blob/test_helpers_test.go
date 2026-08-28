@@ -1,9 +1,9 @@
 package blob
 
 import (
-	"github.com/ankur-anand/unijord/partitionlog/keylayout"
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/partitionlog/keylayout"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
 )
 
 func testSegmentRef(partition uint32, base, last, epoch uint64) pmeta.SegmentRef {

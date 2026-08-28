@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ankur-anand/unijord/partitionlog/blob/sink/multipart"
-	"github.com/ankur-anand/unijord/partitionlog/blob/sink/stream"
-	"github.com/ankur-anand/unijord/partitionlog/segwriter"
-	plwriter "github.com/ankur-anand/unijord/partitionlog/writer"
+	"github.com/ankur-anand/objlog/partitionlog/blob/sink/multipart"
+	"github.com/ankur-anand/objlog/partitionlog/blob/sink/stream"
+	"github.com/ankur-anand/objlog/partitionlog/segwriter"
+	plwriter "github.com/ankur-anand/objlog/partitionlog/writer"
 )
 
 type Factory struct {

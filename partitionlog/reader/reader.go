@@ -7,9 +7,9 @@ import (
 	"math"
 	"time"
 
-	"github.com/ankur-anand/unijord/partitionlog/catalog"
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
-	"github.com/ankur-anand/unijord/partitionlog/segreader"
+	"github.com/ankur-anand/objlog/partitionlog/catalog"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
+	"github.com/ankur-anand/objlog/partitionlog/segreader"
 )
 
 func New(cat catalog.Reader, store SegmentStore, opts Options) (*Reader, error) {

@@ -5,11 +5,11 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/ankur-anand/unijord/partitionlog/catalog"
-	"github.com/ankur-anand/unijord/partitionlog/catalog/writeradapter"
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
-	"github.com/ankur-anand/unijord/partitionlog/writer"
+	"github.com/ankur-anand/objlog/partitionlog/catalog"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/writeradapter"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/partitionlog/writer"
 )
 
 func TestSessionPublishesToCatalog(t *testing.T) {

@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ankur-anand/unijord/partitionlog/blob/sink/multipart"
+	"github.com/ankur-anand/objlog/partitionlog/blob/sink/multipart"
 )
 
 const cleanupTimeout = 5 * time.Second

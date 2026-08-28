@@ -7,16 +7,16 @@ import (
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
-	"github.com/ankur-anand/unijord/partitionlog/blob/lifecycle"
-	segmentsink "github.com/ankur-anand/unijord/partitionlog/blob/sink"
-	azuresink "github.com/ankur-anand/unijord/partitionlog/blob/sink/azure"
-	azuresource "github.com/ankur-anand/unijord/partitionlog/blob/source/azure"
-	"github.com/ankur-anand/unijord/partitionlog/catalog"
-	catalogblob "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
-	azurecatalog "github.com/ankur-anand/unijord/partitionlog/catalog/blob/azure"
-	"github.com/ankur-anand/unijord/partitionlog/keylayout"
-	"github.com/ankur-anand/unijord/partitionlog/reader"
-	"github.com/ankur-anand/unijord/partitionlog/writer"
+	"github.com/ankur-anand/objlog/partitionlog/blob/lifecycle"
+	segmentsink "github.com/ankur-anand/objlog/partitionlog/blob/sink"
+	azuresink "github.com/ankur-anand/objlog/partitionlog/blob/sink/azure"
+	azuresource "github.com/ankur-anand/objlog/partitionlog/blob/source/azure"
+	"github.com/ankur-anand/objlog/partitionlog/catalog"
+	catalogblob "github.com/ankur-anand/objlog/partitionlog/catalog/blob"
+	azurecatalog "github.com/ankur-anand/objlog/partitionlog/catalog/blob/azure"
+	"github.com/ankur-anand/objlog/partitionlog/keylayout"
+	"github.com/ankur-anand/objlog/partitionlog/reader"
+	"github.com/ankur-anand/objlog/partitionlog/writer"
 )
 
 // Options configures a complete Azure-backed partitionlog store.

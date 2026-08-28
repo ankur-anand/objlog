@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/ankur-anand/unijord/partitionlog/segreader"
+	"github.com/ankur-anand/objlog/partitionlog/segreader"
 )
 
 type Fixture struct {

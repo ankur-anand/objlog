@@ -1,6 +1,6 @@
 package blob
 
-import blobmemory "github.com/ankur-anand/unijord/internal/blobstore/memory"
+import blobmemory "github.com/ankur-anand/objlog/internal/blobstore/memory"
 
 // MemoryBackend is an in-memory Backend for tests and local development.
 type MemoryBackend = blobmemory.Store

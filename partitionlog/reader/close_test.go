@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	blobcache "github.com/ankur-anand/unijord/partitionlog/blob/cache"
-	"github.com/ankur-anand/unijord/partitionlog/catalog"
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
-	"github.com/ankur-anand/unijord/partitionlog/segreader"
+	blobcache "github.com/ankur-anand/objlog/partitionlog/blob/cache"
+	"github.com/ankur-anand/objlog/partitionlog/catalog"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
+	"github.com/ankur-anand/objlog/partitionlog/segreader"
 )
 
 func TestReaderCloseReleasesOwnedRuntime(t *testing.T) {

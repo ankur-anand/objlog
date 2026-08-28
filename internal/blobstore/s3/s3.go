@@ -8,7 +8,7 @@ import (
 	"io"
 	"math"
 
-	"github.com/ankur-anand/unijord/internal/blobstore"
+	"github.com/ankur-anand/objlog/internal/blobstore"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	awstypes "github.com/aws/aws-sdk-go-v2/service/s3/types"

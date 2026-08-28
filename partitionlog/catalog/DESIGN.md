@@ -75,15 +75,15 @@ knows how to build a complete catalog from an SDK client:
 cat := catalog.NewMemory()
 
 s3Cat, err := s3catalog.New(s3Client, bucket, s3catalog.Options{
-    Prefix: "unijord/catalog",
+    Prefix: "objlog/catalog",
 })
 
 gcsCat, err := gcscatalog.New(gcsClient, bucket, gcscatalog.Options{
-    Prefix: "unijord/catalog",
+    Prefix: "objlog/catalog",
 })
 
 azureCat, err := azurecatalog.New(containerClient, azurecatalog.Options{
-    Prefix: "unijord/catalog",
+    Prefix: "objlog/catalog",
 })
 ```
 
@@ -91,7 +91,7 @@ Advanced users can still construct the lower-level blob catalog explicitly:
 
 ```go
 backend, err := s3catalog.NewBackend(s3Client, bucket)
-cat, err := blob.New(backend, blob.Options{Prefix: "unijord/catalog"})
+cat, err := blob.New(backend, blob.Options{Prefix: "objlog/catalog"})
 ```
 
 This keeps the root `catalog` package free of provider imports and avoids an

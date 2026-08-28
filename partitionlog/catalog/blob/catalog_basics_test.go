@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	pcatalog "github.com/ankur-anand/unijord/partitionlog/catalog"
+	pcatalog "github.com/ankur-anand/objlog/partitionlog/catalog"
 )
 
 func TestPathsAreSelfDescribing(t *testing.T) {

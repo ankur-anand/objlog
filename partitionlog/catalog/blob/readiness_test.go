@@ -7,11 +7,11 @@ import (
 	"sync/atomic"
 	"testing"
 
-	segmentsink "github.com/ankur-anand/unijord/partitionlog/blob/sink"
-	pcatalog "github.com/ankur-anand/unijord/partitionlog/catalog"
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
-	plwriter "github.com/ankur-anand/unijord/partitionlog/writer"
+	segmentsink "github.com/ankur-anand/objlog/partitionlog/blob/sink"
+	pcatalog "github.com/ankur-anand/objlog/partitionlog/catalog"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
+	plwriter "github.com/ankur-anand/objlog/partitionlog/writer"
 )
 
 type catalogModel interface {

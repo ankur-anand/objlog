@@ -3,7 +3,7 @@ package segblock
 import (
 	"fmt"
 
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
 )
 
 func Seal(codec segformat.Codec, hashAlgo segformat.HashAlgo, raw []byte, meta Meta) (Sealed, error) {

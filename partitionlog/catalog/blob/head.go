@@ -3,8 +3,8 @@ package blob
 import (
 	"context"
 
-	csession "github.com/ankur-anand/unijord/partitionlog/catalog"
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
+	csession "github.com/ankur-anand/objlog/partitionlog/catalog"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
 )
 
 var _ csession.WriterManager = (*Catalog)(nil)

@@ -9,8 +9,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/ankur-anand/unijord/partitionlog/catalog/blob/internal/catformat"
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/blob/internal/catformat"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
 )
 
 type fixture struct {

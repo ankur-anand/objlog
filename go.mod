@@ -1,4 +1,4 @@
-module github.com/ankur-anand/unijord
+module github.com/ankur-anand/objlog
 
 go 1.25.2
 

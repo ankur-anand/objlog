@@ -7,8 +7,8 @@ import (
 	"sync"
 	"testing"
 
-	pcatalog "github.com/ankur-anand/unijord/partitionlog/catalog"
-	plwriter "github.com/ankur-anand/unijord/partitionlog/writer"
+	pcatalog "github.com/ankur-anand/objlog/partitionlog/catalog"
+	plwriter "github.com/ankur-anand/objlog/partitionlog/writer"
 )
 
 type testWriterSession struct {

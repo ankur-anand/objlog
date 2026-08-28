@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
-	"github.com/ankur-anand/unijord/partitionlog/blob/source/internal/sourcetest"
+	"github.com/ankur-anand/objlog/partitionlog/blob/source/internal/sourcetest"
 )
 
 func TestStoreConformanceWithFakeAzure(t *testing.T) {

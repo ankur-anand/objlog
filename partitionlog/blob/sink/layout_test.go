@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	plwriter "github.com/ankur-anand/unijord/partitionlog/writer"
+	plwriter "github.com/ankur-anand/objlog/partitionlog/writer"
 )
 
 func TestSegmentLayoutRoundTripAndLowerBound(t *testing.T) {

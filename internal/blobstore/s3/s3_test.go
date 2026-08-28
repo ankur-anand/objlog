@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ankur-anand/unijord/internal/blobstore"
+	"github.com/ankur-anand/objlog/internal/blobstore"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsretry "github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"

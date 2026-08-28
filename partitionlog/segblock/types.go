@@ -1,6 +1,6 @@
 package segblock
 
-import "github.com/ankur-anand/unijord/partitionlog/segformat"
+import "github.com/ankur-anand/objlog/partitionlog/segformat"
 
 type Meta struct {
 	BaseLSN        uint64

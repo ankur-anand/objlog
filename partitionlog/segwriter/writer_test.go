@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ankur-anand/unijord/partitionlog/segblock"
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/partitionlog/segblock"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
 )
 
 func TestWriterEndToEndCodecNone(t *testing.T) {

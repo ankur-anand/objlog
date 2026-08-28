@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ankur-anand/unijord/partitionlog/internal/lifecycletest"
-	pls3 "github.com/ankur-anand/unijord/partitionlog/s3"
+	"github.com/ankur-anand/objlog/partitionlog/internal/lifecycletest"
+	pls3 "github.com/ankur-anand/objlog/partitionlog/s3"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"

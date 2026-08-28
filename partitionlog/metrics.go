@@ -3,8 +3,8 @@ package partitionlog
 import (
 	"time"
 
-	plreader "github.com/ankur-anand/unijord/partitionlog/reader"
-	plwriter "github.com/ankur-anand/unijord/partitionlog/writer"
+	plreader "github.com/ankur-anand/objlog/partitionlog/reader"
+	plwriter "github.com/ankur-anand/objlog/partitionlog/writer"
 )
 
 // MetricName identifies one observed partitionlog event.

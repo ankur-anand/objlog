@@ -1,6 +1,6 @@
 package catformat
 
-import "github.com/ankur-anand/unijord/partitionlog/segformat"
+import "github.com/ankur-anand/objlog/partitionlog/segformat"
 
 // LeafEntry is the fixed-width catalog representation of one SegmentRef.
 // URI, StreamID, and Partition are supplied by the catalog reader.

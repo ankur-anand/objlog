@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"cloud.google.com/go/storage"
-	"github.com/ankur-anand/unijord/partitionlog/blob/sink/internal/sinktest"
-	"github.com/ankur-anand/unijord/partitionlog/blob/sink/multipart"
+	"github.com/ankur-anand/objlog/partitionlog/blob/sink/internal/sinktest"
+	"github.com/ankur-anand/objlog/partitionlog/blob/sink/multipart"
 	"github.com/fsouza/fake-gcs-server/fakestorage"
 	"google.golang.org/api/googleapi"
 )

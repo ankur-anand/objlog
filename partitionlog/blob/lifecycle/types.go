@@ -8,12 +8,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ankur-anand/unijord/internal/blobstore"
-	segmentsink "github.com/ankur-anand/unijord/partitionlog/blob/sink"
-	"github.com/ankur-anand/unijord/partitionlog/catalog"
-	catalogblob "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
-	"github.com/ankur-anand/unijord/partitionlog/keylayout"
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
+	"github.com/ankur-anand/objlog/internal/blobstore"
+	segmentsink "github.com/ankur-anand/objlog/partitionlog/blob/sink"
+	"github.com/ankur-anand/objlog/partitionlog/catalog"
+	catalogblob "github.com/ankur-anand/objlog/partitionlog/catalog/blob"
+	"github.com/ankur-anand/objlog/partitionlog/keylayout"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
 )
 
 var (

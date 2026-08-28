@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"time"
 
-	csession "github.com/ankur-anand/unijord/partitionlog/catalog"
-	"github.com/ankur-anand/unijord/partitionlog/keylayout"
+	csession "github.com/ankur-anand/objlog/partitionlog/catalog"
+	"github.com/ankur-anand/objlog/partitionlog/keylayout"
 )
 
 const (

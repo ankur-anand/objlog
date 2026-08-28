@@ -7,13 +7,13 @@ import (
 	"sync"
 	"time"
 
-	blobcache "github.com/ankur-anand/unijord/partitionlog/blob/cache"
-	"github.com/ankur-anand/unijord/partitionlog/catalog"
-	"github.com/ankur-anand/unijord/partitionlog/catalog/writeradapter"
-	"github.com/ankur-anand/unijord/partitionlog/reader"
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
-	"github.com/ankur-anand/unijord/partitionlog/segwriter"
-	lowwriter "github.com/ankur-anand/unijord/partitionlog/writer"
+	blobcache "github.com/ankur-anand/objlog/partitionlog/blob/cache"
+	"github.com/ankur-anand/objlog/partitionlog/catalog"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/writeradapter"
+	"github.com/ankur-anand/objlog/partitionlog/reader"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/partitionlog/segwriter"
+	lowwriter "github.com/ankur-anand/objlog/partitionlog/writer"
 )
 
 type Clock = lowwriter.Clock

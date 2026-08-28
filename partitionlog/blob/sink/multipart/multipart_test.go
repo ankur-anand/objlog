@@ -37,7 +37,7 @@ func TestNormalizeOptionsRejectsReservedMetadata(t *testing.T) {
 	t.Parallel()
 
 	_, err := NormalizeOptions("segments/final", Options{Metadata: map[string]string{
-		"Unijord_Upload_Session": "caller-value",
+		"Objlog_Upload_Session": "caller-value",
 	}})
 	if !errors.Is(err, ErrInvalidStore) {
 		t.Fatalf("NormalizeOptions() error = %v, want ErrInvalidStore", err)

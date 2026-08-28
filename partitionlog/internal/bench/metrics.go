@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ankur-anand/unijord/internal/blobstore"
+	"github.com/ankur-anand/objlog/internal/blobstore"
 )
 
 // Sample collects durations and is safe for concurrent use.

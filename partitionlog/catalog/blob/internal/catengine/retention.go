@@ -7,8 +7,8 @@ import (
 	"slices"
 	"sort"
 
-	csession "github.com/ankur-anand/unijord/partitionlog/catalog"
-	"github.com/ankur-anand/unijord/partitionlog/catalog/blob/internal/catformat"
+	csession "github.com/ankur-anand/objlog/partitionlog/catalog"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/blob/internal/catformat"
 )
 
 func ApplyRetention(ctx context.Context, config Config, pages PageSource, head catformat.Head, beforeLSN, policyVersion uint64) (Mutation, error) {

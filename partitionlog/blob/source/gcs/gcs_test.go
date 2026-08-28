@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"cloud.google.com/go/storage"
-	"github.com/ankur-anand/unijord/partitionlog/blob/source/internal/sourcetest"
+	"github.com/ankur-anand/objlog/partitionlog/blob/source/internal/sourcetest"
 	"github.com/fsouza/fake-gcs-server/fakestorage"
 )
 

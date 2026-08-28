@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ankur-anand/unijord/partitionlog/blob/sink/multipart"
-	uploadstream "github.com/ankur-anand/unijord/partitionlog/blob/sink/stream"
-	"github.com/ankur-anand/unijord/partitionlog/segwriter"
+	"github.com/ankur-anand/objlog/partitionlog/blob/sink/multipart"
+	uploadstream "github.com/ankur-anand/objlog/partitionlog/blob/sink/stream"
+	"github.com/ankur-anand/objlog/partitionlog/segwriter"
 )
 
 type segmentSink struct {

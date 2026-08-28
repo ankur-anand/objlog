@@ -1,6 +1,6 @@
 package segreader
 
-import "github.com/ankur-anand/unijord/partitionlog/segformat"
+import "github.com/ankur-anand/objlog/partitionlog/segformat"
 
 type Record struct {
 	Partition   uint32

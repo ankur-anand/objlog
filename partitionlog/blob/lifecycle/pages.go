@@ -3,7 +3,7 @@ package lifecycle
 import (
 	"context"
 
-	catalogblob "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
+	catalogblob "github.com/ankur-anand/objlog/partitionlog/catalog/blob"
 )
 
 func (r *Reclaimer) reclaimPages(ctx context.Context, state *stateFile, token *string, budget *runBudget) error {

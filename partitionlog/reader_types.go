@@ -1,6 +1,6 @@
 package partitionlog
 
-import plreader "github.com/ankur-anand/unijord/partitionlog/reader"
+import plreader "github.com/ankur-anand/objlog/partitionlog/reader"
 
 // Reader reads committed records from a partition log.
 type Reader = plreader.Reader

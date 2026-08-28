@@ -10,7 +10,7 @@ import (
 	"strconv"
 
 	"cloud.google.com/go/storage"
-	"github.com/ankur-anand/unijord/internal/blobstore"
+	"github.com/ankur-anand/objlog/internal/blobstore"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 )

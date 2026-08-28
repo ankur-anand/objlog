@@ -23,8 +23,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ankur-anand/unijord/partitionlog/internal/bench"
-	_ "github.com/ankur-anand/unijord/partitionlog/internal/bench/scenarios"
+	"github.com/ankur-anand/objlog/partitionlog/internal/bench"
+	_ "github.com/ankur-anand/objlog/partitionlog/internal/bench/scenarios"
 )
 
 func main() {

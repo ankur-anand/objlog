@@ -13,8 +13,8 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
-	plazure "github.com/ankur-anand/unijord/partitionlog/azure"
-	"github.com/ankur-anand/unijord/partitionlog/internal/lifecycletest"
+	plazure "github.com/ankur-anand/objlog/partitionlog/azure"
+	"github.com/ankur-anand/objlog/partitionlog/internal/lifecycletest"
 )
 
 const defaultAzuriteConnectionString = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"

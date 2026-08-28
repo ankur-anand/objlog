@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	segmentsink "github.com/ankur-anand/unijord/partitionlog/blob/sink"
-	"github.com/ankur-anand/unijord/partitionlog/catalog"
-	catalogblob "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
+	segmentsink "github.com/ankur-anand/objlog/partitionlog/blob/sink"
+	"github.com/ankur-anand/objlog/partitionlog/catalog"
+	catalogblob "github.com/ankur-anand/objlog/partitionlog/catalog/blob"
 )
 
 type segmentScrubObject struct {

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	csession "github.com/ankur-anand/unijord/partitionlog/catalog"
+	csession "github.com/ankur-anand/objlog/partitionlog/catalog"
 )
 
 var _ csession.RetentionManager = (*Catalog)(nil)

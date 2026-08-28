@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ankur-anand/unijord/internal/blobstore"
+	"github.com/ankur-anand/objlog/internal/blobstore"
 )
 
 type Store struct {

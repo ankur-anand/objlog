@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ankur-anand/unijord/internal/blobstore"
-	catalogblob "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
+	"github.com/ankur-anand/objlog/internal/blobstore"
+	catalogblob "github.com/ankur-anand/objlog/partitionlog/catalog/blob"
 )
 
 const stateVersion = 1

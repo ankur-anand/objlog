@@ -7,16 +7,16 @@ import (
 	"strings"
 
 	"cloud.google.com/go/storage"
-	"github.com/ankur-anand/unijord/partitionlog/blob/lifecycle"
-	segmentsink "github.com/ankur-anand/unijord/partitionlog/blob/sink"
-	gcssink "github.com/ankur-anand/unijord/partitionlog/blob/sink/gcs"
-	gcssource "github.com/ankur-anand/unijord/partitionlog/blob/source/gcs"
-	"github.com/ankur-anand/unijord/partitionlog/catalog"
-	catalogblob "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
-	gcscatalog "github.com/ankur-anand/unijord/partitionlog/catalog/blob/gcs"
-	"github.com/ankur-anand/unijord/partitionlog/keylayout"
-	"github.com/ankur-anand/unijord/partitionlog/reader"
-	"github.com/ankur-anand/unijord/partitionlog/writer"
+	"github.com/ankur-anand/objlog/partitionlog/blob/lifecycle"
+	segmentsink "github.com/ankur-anand/objlog/partitionlog/blob/sink"
+	gcssink "github.com/ankur-anand/objlog/partitionlog/blob/sink/gcs"
+	gcssource "github.com/ankur-anand/objlog/partitionlog/blob/source/gcs"
+	"github.com/ankur-anand/objlog/partitionlog/catalog"
+	catalogblob "github.com/ankur-anand/objlog/partitionlog/catalog/blob"
+	gcscatalog "github.com/ankur-anand/objlog/partitionlog/catalog/blob/gcs"
+	"github.com/ankur-anand/objlog/partitionlog/keylayout"
+	"github.com/ankur-anand/objlog/partitionlog/reader"
+	"github.com/ankur-anand/objlog/partitionlog/writer"
 )
 
 // Options configures a complete GCS-backed partitionlog store.

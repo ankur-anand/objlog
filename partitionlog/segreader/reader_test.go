@@ -7,9 +7,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
-	"github.com/ankur-anand/unijord/partitionlog/segwriter"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/partitionlog/segwriter"
 )
 
 func TestOpenReadAllCodecNone(t *testing.T) {

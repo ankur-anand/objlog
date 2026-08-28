@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
-	"github.com/ankur-anand/unijord/partitionlog/segblock"
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
+	"github.com/ankur-anand/objlog/partitionlog/segblock"
+	"github.com/ankur-anand/objlog/partitionlog/segformat"
 )
 
 // Reader reads one immutable segment object. It is safe for concurrent Read or

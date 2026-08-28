@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/ankur-anand/unijord/partitionlog/pmeta"
-	"github.com/ankur-anand/unijord/partitionlog/segreader"
+	"github.com/ankur-anand/objlog/partitionlog/pmeta"
+	"github.com/ankur-anand/objlog/partitionlog/segreader"
 )
 
 // SegmentReaderCache caches opened immutable segment readers.

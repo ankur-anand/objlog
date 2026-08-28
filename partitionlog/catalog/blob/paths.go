@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ankur-anand/unijord/partitionlog/keylayout"
+	"github.com/ankur-anand/objlog/partitionlog/keylayout"
 )
 
 const DefaultPrefix = "catalog"

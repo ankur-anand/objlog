@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/ankur-anand/unijord/partitionlog/catalog/blob"
-	"github.com/ankur-anand/unijord/partitionlog/catalog/blob/internal/backendtest"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/blob"
+	"github.com/ankur-anand/objlog/partitionlog/catalog/blob/internal/backendtest"
 )
 
 func TestMemoryBackendConformance(t *testing.T) {
