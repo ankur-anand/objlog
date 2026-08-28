@@ -1,0 +1,546 @@
+package partitionlog
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	blobcache "github.com/ankur-anand/unijord/partitionlog/blob/cache"
+	"github.com/ankur-anand/unijord/partitionlog/catalog"
+	"github.com/ankur-anand/unijord/partitionlog/catalog/writeradapter"
+	"github.com/ankur-anand/unijord/partitionlog/reader"
+	"github.com/ankur-anand/unijord/partitionlog/segformat"
+	"github.com/ankur-anand/unijord/partitionlog/segwriter"
+	lowwriter "github.com/ankur-anand/unijord/partitionlog/writer"
+)
+
+type Clock = lowwriter.Clock
+type ClockFunc = lowwriter.ClockFunc
+type Timer = lowwriter.Timer
+type SystemClock = lowwriter.SystemClock
+
+type Options struct {
+	Store   Store
+	Reader  ReaderOptions
+	Metrics Metrics
+	// Clock supplies timestamps and timers for durable metadata and age-based
+	// writer rolling. Nil uses the system clock.
+	Clock Clock
+}
+
+var ErrLogClosed = errors.New("partitionlog: log closed")
+
+// ReaderOptions configures the default reader created by Open.
+type ReaderOptions struct {
+	MaxRecordsPerBatch int
+	// MaxCachedPartitionHeads bounds catalog heads retained for passive reads.
+	// Heads for explicitly watched partitions remain pinned until their final
+	// Watch is closed or removes the partition.
+	MaxCachedPartitionHeads int
+
+	// RangeCacheBytes is the memory budget for cached byte ranges read from
+	// segment objects.
+	RangeCacheBytes uint64
+
+	// OpenSegmentReaders is the number of parsed segment readers to keep in
+	// memory. It avoids repeatedly opening and parsing hot segment metadata.
+	OpenSegmentReaders int
+
+	Refresh RefreshPolicy
+}
+
+// WriterOptions configures one per-partition writer opened from a Log.
+type WriterOptions struct {
+	Partition uint32
+	// WriterID uniquely identifies this writer incarnation. Do not reuse it for
+	// concurrent writers; generate a new ID after restart or replacement.
+	WriterID [16]byte
+
+	Batch        BatchPolicy
+	Backpressure BackpressurePolicy
+	Pipeline     WriterPipelineOptions
+	Timeouts     WriterOperationTimeouts
+}
+
+// WriterOperationTimeouts bound background work owned by the writer after a
+// record is accepted. A public method's context only bounds that caller's
+// wait; canceling it does not abandon accepted segment finalization or catalog
+// publication. Zero values keep the defaults.
+type WriterOperationTimeouts struct {
+	SegmentFinalize time.Duration
+	CatalogPublish  time.Duration
+}
+
+// Log is one partitionlog client over one configured store.
+type Log struct {
+	mu      sync.Mutex
+	store   Store
+	metrics Metrics
+	reader  *Reader
+	clock   lowwriter.Clock
+	closed  bool
+}
+
+// Open validates a complete Store and prepares the default reader runtime.
+func Open(opts Options) (*Log, error) {
+	if opts.Store == nil {
+		return nil, fmt.Errorf("partitionlog: nil store")
+	}
+	r, err := newReader(opts.Store, opts.Reader, opts.Metrics)
+	if err != nil {
+		return nil, err
+	}
+	clock := opts.Clock
+	if clock == nil {
+		clock = lowwriter.SystemClock{}
+	}
+	return &Log{store: opts.Store, metrics: opts.Metrics, reader: r, clock: clock}, nil
+}
+
+// Close releases the default Reader runtime. Callers must stop using the Log
+// before Close. Readers returned by NewReader are independently owned and must
+// be closed by their callers. Close does not close the configured Store or
+// writers that were already opened.
+func (l *Log) Close() error {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		return nil
+	}
+	l.closed = true
+	r := l.reader
+	l.mu.Unlock()
+	if r == nil {
+		return nil
+	}
+	return r.Close()
+}
+
+func (l *Log) checkOpen() error {
+	if l == nil {
+		return fmt.Errorf("partitionlog: nil log")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return ErrLogClosed
+	}
+	if l.store == nil {
+		return fmt.Errorf("partitionlog: nil log")
+	}
+	return nil
+}
+
+// Reader returns the default reader runtime for this log.
+func (l *Log) Reader() *Reader {
+	if l == nil {
+		return nil
+	}
+	return l.reader
+}
+
+// NewReader creates an additional reader runtime over the same store.
+func (l *Log) NewReader(opts ReaderOptions) (*Reader, error) {
+	if l == nil {
+		return nil, fmt.Errorf("partitionlog: nil log")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return nil, ErrLogClosed
+	}
+	if l.store == nil {
+		return nil, fmt.Errorf("partitionlog: nil log")
+	}
+	return newReader(l.store, opts, l.metrics)
+}
+
+// InitializePartition creates an empty partition at a chosen next LSN only
+// when no durable catalog state exists yet.
+func (l *Log) InitializePartition(ctx context.Context, opts InitializePartition) (InitializePartitionResult, error) {
+	if err := l.checkOpen(); err != nil {
+		return InitializePartitionResult{}, err
+	}
+	manager := l.store.WriterManager()
+	if manager == nil {
+		return InitializePartitionResult{}, fmt.Errorf("partitionlog: nil writer catalog")
+	}
+	head, created, err := manager.InitializePartition(ctx, opts.Partition, opts.NextLSN)
+	if err != nil {
+		return InitializePartitionResult{}, err
+	}
+	return InitializePartitionResult{Head: head, Created: created}, nil
+}
+
+// RequestRetention stores a monotonic retention request. It does not change
+// reader visibility until the active partition writer applies it.
+func (l *Log) RequestRetention(ctx context.Context, request RetentionRequest) (RetentionRequestState, error) {
+	if err := l.checkOpen(); err != nil {
+		return RetentionRequestState{}, err
+	}
+	manager := l.store.RetentionManager()
+	if manager == nil {
+		return RetentionRequestState{}, fmt.Errorf("partitionlog: nil retention catalog")
+	}
+	durable, err := manager.RequestRetention(ctx, request.Partition, catalog.RetentionRequest{
+		Version:       catalog.RetentionRequestVersion,
+		PolicyVersion: request.PolicyVersion,
+		BeforeLSN:     request.BeforeLSN,
+		CreatedUnixMS: l.clock.Now().UTC().UnixMilli(),
+	})
+	if err != nil {
+		return RetentionRequestState{}, err
+	}
+	return RetentionRequestState{
+		Partition:     request.Partition,
+		PolicyVersion: durable.PolicyVersion,
+		BeforeLSN:     durable.BeforeLSN,
+		CreatedUnixMS: durable.CreatedUnixMS,
+	}, nil
+}
+
+// OpenWriter opens one fenced writer for one partition.
+func (l *Log) OpenWriter(ctx context.Context, opts WriterOptions) (*Writer, error) {
+	if err := l.checkOpen(); err != nil {
+		return nil, err
+	}
+	if err := validateWriterOptions(opts); err != nil {
+		return nil, err
+	}
+
+	catalogWriterManager := l.store.WriterManager()
+	if catalogWriterManager == nil {
+		return nil, fmt.Errorf("partitionlog: nil writer catalog")
+	}
+	sinkFactory := l.store.SinkFactory()
+	if sinkFactory == nil {
+		return nil, fmt.Errorf("partitionlog: nil sink factory")
+	}
+	wopts := lowwriter.DefaultOptions(sinkFactory)
+	wopts.Clock = l.clock
+	if opts.Batch.MaxRecords > 0 {
+		wopts.Roll.MaxSegmentRecords = opts.Batch.MaxRecords
+	}
+	if opts.Batch.MaxBytes > 0 {
+		wopts.Roll.MaxSegmentRawBytes = opts.Batch.MaxBytes
+	}
+	if opts.Batch.MaxDelay != 0 {
+		wopts.Roll.MaxSegmentAge = opts.Batch.MaxDelay
+	}
+	if opts.Backpressure.MaxPendingBatches != 0 {
+		wopts.Queue.MaxInflightSegments = opts.Backpressure.MaxPendingBatches
+	}
+	if opts.Backpressure.MaxPendingBytes > 0 {
+		wopts.Queue.MaxInflightBytes = opts.Backpressure.MaxPendingBytes
+	}
+	if opts.Timeouts.SegmentFinalize != 0 {
+		wopts.Timeouts.SegmentFinalize = opts.Timeouts.SegmentFinalize
+	}
+	if opts.Timeouts.CatalogPublish != 0 {
+		wopts.Timeouts.CatalogPublish = opts.Timeouts.CatalogPublish
+	}
+	if err := applyWriterPipelineOptions(&wopts, opts.Partition, opts.Pipeline); err != nil {
+		return nil, err
+	}
+	if l.metrics != nil {
+		wopts.Observer = writerMetricsAdapter{metrics: l.metrics}
+	}
+
+	catalogSession, err := catalogWriterManager.OpenWriter(ctx, opts.Partition, opts.WriterID)
+	if err != nil {
+		return nil, err
+	}
+	session, err := writeradapter.New(catalogSession)
+	if err != nil {
+		return nil, err
+	}
+	wopts.Session = session
+	inner, err := lowwriter.New(wopts)
+	if err != nil {
+		return nil, err
+	}
+	return &Writer{inner: inner, partition: opts.Partition, metrics: l.metrics}, nil
+}
+
+// Writer appends records to one fenced partition. Calls that mutate the writer
+// must be serialized. State, Err, and Committed may be used by observer
+// goroutines.
+type Writer struct {
+	inner     *lowwriter.Writer
+	partition uint32
+	metrics   Metrics
+}
+
+// Append assigns the next LSN and appends record to this writer's partition.
+func (w *Writer) Append(ctx context.Context, record Record) (result AppendResult, err error) {
+	start := time.Now()
+	recordSize, _ := segformat.RecordSize(record.Headers, record.Value)
+	recordBytes := uint64(0)
+	if recordSize > 0 {
+		recordBytes = uint64(recordSize)
+	}
+	defer func() {
+		w.observe(Metric{
+			Name:      MetricWriterAppend,
+			Partition: w.partition,
+			LSN:       result.LSN,
+			Records:   1,
+			Bytes:     recordBytes,
+			Duration:  time.Since(start),
+			Err:       err,
+		})
+	}()
+	innerResult, err := w.inner.Append(ctx, lowwriter.Record{
+		TimestampMS: record.TimestampMS,
+		Headers:     record.Headers,
+		Value:       record.Value,
+	})
+	if err != nil {
+		return AppendResult{}, err
+	}
+	result = AppendResult{LSN: innerResult.LSN}
+	return result, nil
+}
+
+// Cut rotates the current active segment if it contains records.
+func (w *Writer) Cut(ctx context.Context) (err error) {
+	start := time.Now()
+	defer func() {
+		w.observeWriterOperation(MetricWriterCut, time.Since(start), err)
+	}()
+	return w.inner.Cut(ctx)
+}
+
+// Flush publishes all records accepted before Flush returns.
+func (w *Writer) Flush(ctx context.Context) (result Snapshot, err error) {
+	start := time.Now()
+	defer func() {
+		w.observeWriterSnapshotOperation(MetricWriterFlush, result, time.Since(start), err)
+	}()
+	snapshot, err := w.inner.Flush(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return snapshotFromWriter(snapshot), nil
+}
+
+// Close flushes and closes the writer. If ctx ends during final shutdown, the
+// writer-owned drain continues and a later Close call may join it.
+func (w *Writer) Close(ctx context.Context) (result Snapshot, err error) {
+	start := time.Now()
+	defer func() {
+		w.observeWriterSnapshotOperation(MetricWriterClose, result, time.Since(start), err)
+	}()
+	snapshot, err := w.inner.Close(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return snapshotFromWriter(snapshot), nil
+}
+
+// Abort makes the writer terminal and waits for its shared cleanup drain. If
+// ctx ends first, a later Abort call joins the same drain.
+func (w *Writer) Abort(ctx context.Context) (err error) {
+	start := time.Now()
+	defer func() {
+		w.observeWriterOperation(MetricWriterAbort, time.Since(start), err)
+	}()
+	return w.inner.Abort(ctx)
+}
+
+func (w *Writer) State() WriterState {
+	return stateFromWriter(w.inner.State())
+}
+
+// Committed returns a channel that is closed when the committed snapshot
+// changes or the writer becomes terminal. Obtain the channel before reading
+// State, then call Committed again after every wake. Inspect Err after a wake
+// before waiting again.
+func (w *Writer) Committed() <-chan struct{} {
+	return w.inner.Committed()
+}
+
+func (w *Writer) Err() error {
+	return w.inner.Err()
+}
+
+// ApplyRetention applies the latest pending retention request through this
+// writer's fence. Calls with no newer request are no-ops.
+func (w *Writer) ApplyRetention(ctx context.Context) (result RetentionResult, err error) {
+	start := time.Now()
+	defer func() {
+		w.observeWriterSnapshotOperation(MetricWriterRetention, result.Snapshot, time.Since(start), err)
+	}()
+	inner, err := w.inner.ApplyPendingRetention(ctx)
+	if err != nil {
+		return RetentionResult{}, err
+	}
+	return RetentionResult{
+		Snapshot:      snapshotFromWriter(inner.Snapshot),
+		PolicyVersion: inner.PolicyVersion,
+		RequestedLSN:  inner.RequestedLSN,
+		Applied:       inner.Applied,
+	}, nil
+}
+
+func (w *Writer) observeWriterOperation(name MetricName, duration time.Duration, err error) {
+	w.observeWriterSnapshotOperation(name, Snapshot{}, duration, err)
+}
+
+func (w *Writer) observeWriterSnapshotOperation(name MetricName, snapshot Snapshot, duration time.Duration, err error) {
+	metric := Metric{
+		Name:      name,
+		Partition: w.partition,
+		Duration:  duration,
+		Err:       err,
+	}
+	if snapshot.Head.Partition != 0 || snapshot.Head.NextLSN != 0 || snapshot.Head.SegmentCount != 0 {
+		metric.NextLSN = snapshot.Head.NextLSN
+		metric.SegmentCount = snapshot.Head.SegmentCount
+		metric.ReachableSegmentCount = snapshot.Head.ReachableSegmentCount
+	}
+	w.observe(metric)
+}
+
+func (w *Writer) observe(metric Metric) {
+	if w.metrics == nil {
+		return
+	}
+	state := w.inner.State()
+	metric.InflightSegments = state.InflightSegments
+	metric.InflightBytes = state.InflightBytes
+	w.metrics.Observe(metric)
+}
+
+func newReader(store Store, opts ReaderOptions, metrics Metrics) (*Reader, error) {
+	cat := store.ReaderCatalog()
+	if cat == nil {
+		return nil, fmt.Errorf("partitionlog: nil reader catalog")
+	}
+	segmentStore := store.SegmentStore()
+	if segmentStore == nil {
+		return nil, fmt.Errorf("partitionlog: nil segment store")
+	}
+
+	ropts := reader.Options{
+		MaxRecordsPerBatch:      opts.MaxRecordsPerBatch,
+		MaxCachedPartitionHeads: opts.MaxCachedPartitionHeads,
+		Refresh:                 opts.Refresh,
+	}
+	if metrics != nil {
+		ropts.Observer = readerMetricsAdapter{metrics: metrics}
+	}
+	if opts.RangeCacheBytes > 0 {
+		cachedStore, err := blobcache.NewStore(segmentStore, blobcache.NewLRU(opts.RangeCacheBytes))
+		if err != nil {
+			return nil, err
+		}
+		segmentStore = cachedStore
+	}
+	if opts.OpenSegmentReaders > 0 {
+		segmentCache, err := reader.NewSegmentReaderCache(opts.OpenSegmentReaders)
+		if err != nil {
+			return nil, err
+		}
+		ropts.SegmentCache = segmentCache
+	}
+	return reader.New(cat, segmentStore, ropts)
+}
+
+func validateWriterOptions(opts WriterOptions) error {
+	switch {
+	case opts.Batch.MaxDelay < 0:
+		return fmt.Errorf("partitionlog: negative batch max delay %s", opts.Batch.MaxDelay)
+	case opts.Backpressure.MaxPendingBatches < 0:
+		return fmt.Errorf("partitionlog: negative max pending batches %d", opts.Backpressure.MaxPendingBatches)
+	case opts.Timeouts.SegmentFinalize < 0:
+		return fmt.Errorf("partitionlog: negative segment finalize timeout %s", opts.Timeouts.SegmentFinalize)
+	case opts.Timeouts.CatalogPublish < 0:
+		return fmt.Errorf("partitionlog: negative catalog publish timeout %s", opts.Timeouts.CatalogPublish)
+	default:
+		return validateWriterPipelineOptions(opts.Pipeline)
+	}
+}
+
+func applyWriterPipelineOptions(wopts *lowwriter.Options, partition uint32, opts WriterPipelineOptions) error {
+	if !hasWriterPipelineOptions(opts) {
+		return nil
+	}
+	segment := segwriter.DefaultOptions(partition)
+	if opts.BlockBytes > 0 {
+		segment.TargetBlockSize = opts.BlockBytes
+	}
+	if opts.PartBytes > 0 {
+		segment.PartSize = opts.PartBytes
+	}
+	if opts.SealParallelism > 0 {
+		segment.SealParallelism = opts.SealParallelism
+	}
+	if opts.BlockBuffers > 0 {
+		segment.BlockBufferCount = opts.BlockBuffers
+	}
+	if opts.UploadParallelism > 0 {
+		segment.UploadParallelism = opts.UploadParallelism
+	}
+	if opts.UploadQueueSize > 0 {
+		segment.UploadQueueSize = opts.UploadQueueSize
+	}
+	if opts.UploadLimiter != nil {
+		segment.UploadLimiter = opts.UploadLimiter
+	}
+	wopts.SegmentOptions = segment
+	return nil
+}
+
+func hasWriterPipelineOptions(opts WriterPipelineOptions) bool {
+	return opts.BlockBytes != 0 ||
+		opts.PartBytes != 0 ||
+		opts.SealParallelism != 0 ||
+		opts.BlockBuffers != 0 ||
+		opts.UploadParallelism != 0 ||
+		opts.UploadQueueSize != 0 ||
+		opts.UploadLimiter != nil
+}
+
+func validateWriterPipelineOptions(opts WriterPipelineOptions) error {
+	switch {
+	case opts.BlockBytes < 0:
+		return fmt.Errorf("partitionlog: negative block bytes %d", opts.BlockBytes)
+	case opts.PartBytes < 0:
+		return fmt.Errorf("partitionlog: negative part bytes %d", opts.PartBytes)
+	case opts.SealParallelism < 0:
+		return fmt.Errorf("partitionlog: negative seal parallelism %d", opts.SealParallelism)
+	case opts.BlockBuffers < 0:
+		return fmt.Errorf("partitionlog: negative block buffers %d", opts.BlockBuffers)
+	case opts.UploadParallelism < 0:
+		return fmt.Errorf("partitionlog: negative upload parallelism %d", opts.UploadParallelism)
+	case opts.UploadQueueSize < 0:
+		return fmt.Errorf("partitionlog: negative upload queue size %d", opts.UploadQueueSize)
+	default:
+		return nil
+	}
+}
+
+func snapshotFromWriter(snapshot lowwriter.Snapshot) Snapshot {
+	return Snapshot{
+		Head: snapshot.Head,
+		Identity: WriterIdentity{
+			Epoch: snapshot.Identity.Epoch,
+			Tag:   snapshot.Identity.Tag,
+		},
+	}
+}
+
+func stateFromWriter(state lowwriter.State) WriterState {
+	return WriterState{
+		Snapshot:          snapshotFromWriter(state.Snapshot),
+		OptimisticNextLSN: state.OptimisticNextLSN,
+		InflightSegments:  state.InflightSegments,
+		InflightBytes:     state.InflightBytes,
+	}
+}

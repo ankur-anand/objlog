@@ -1,0 +1,119 @@
+package s3
+
+import (
+	"context"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/ankur-anand/unijord/partitionlog/catalog/blob"
+	"github.com/ankur-anand/unijord/partitionlog/catalog/blob/internal/backendtest"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/johannesboyne/gofakes3"
+	"github.com/johannesboyne/gofakes3/backend/s3mem"
+)
+
+func TestBackendConformanceWithFakeS3(t *testing.T) {
+	t.Parallel()
+
+	backendtest.Run(t, backendtest.Config{
+		NewBackend: func(t testing.TB) blob.Backend {
+			t.Helper()
+			backend, _ := newFakeBackend(t, "catalog")
+			return backend
+		},
+	})
+}
+
+func TestBackendContentTypeWithFakeS3(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	const bucket = "catalog"
+	backend, client := newFakeBackend(t, bucket)
+	obj, err := backend.Put(ctx, "catalog/p00000001/pages/l00/leaf.plc", []byte("binary"))
+	if err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+	head, err := client.HeadObject(ctx, &awss3.HeadObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(obj.Key),
+	})
+	if err != nil {
+		t.Fatalf("HeadObject() error = %v", err)
+	}
+	if aws.ToString(head.ContentType) != blob.ObjectContentType {
+		t.Fatalf("ContentType = %q, want %q", aws.ToString(head.ContentType), blob.ObjectContentType)
+	}
+}
+
+func TestBackendRejectsBadInputs(t *testing.T) {
+	t.Parallel()
+
+	client := newFakeS3Client(t, "catalog")
+	if _, err := New(nil, "catalog", Options{}); err == nil {
+		t.Fatal("New(nil) error = nil, want error")
+	}
+	if _, err := New(client, "", Options{}); err == nil {
+		t.Fatal("New(empty bucket) error = nil, want error")
+	}
+	if _, err := NewBackend(nil, "catalog"); err == nil {
+		t.Fatal("NewBackend(nil) error = nil, want error")
+	}
+	if _, err := NewBackend(client, ""); err == nil {
+		t.Fatal("NewBackend(empty bucket) error = nil, want error")
+	}
+}
+
+func TestNewCatalogWithFakeS3(t *testing.T) {
+	t.Parallel()
+
+	cat, err := New(newFakeS3Client(t, "catalog"), "catalog", Options{Prefix: "catalog-test"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	head, err := cat.LoadPartition(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("LoadPartition() error = %v", err)
+	}
+	if head.Partition != 1 || head.NextLSN != 0 {
+		t.Fatalf("head = %+v, want empty partition 1", head)
+	}
+}
+
+func newFakeBackend(t testing.TB, bucket string) (*Backend, *awss3.Client) {
+	t.Helper()
+	client := newFakeS3Client(t, bucket)
+	backend, err := NewBackend(client, bucket)
+	if err != nil {
+		t.Fatalf("NewBackend() error = %v", err)
+	}
+	return backend, client
+}
+
+func newFakeS3Client(t testing.TB, bucket string) *awss3.Client {
+	t.Helper()
+
+	backend := s3mem.New()
+	if err := backend.CreateBucket(bucket); err != nil {
+		t.Fatalf("CreateBucket() error = %v", err)
+	}
+	faker := gofakes3.New(backend)
+	server := httptest.NewServer(faker.Server())
+	t.Cleanup(server.Close)
+
+	cfg, err := config.LoadDefaultConfig(context.Background(),
+		config.WithRegion("us-east-1"),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("access-key", "secret-key", "")),
+		config.WithResponseChecksumValidation(aws.ResponseChecksumValidationWhenRequired),
+	)
+	if err != nil {
+		t.Fatalf("LoadDefaultConfig() error = %v", err)
+	}
+	return awss3.NewFromConfig(cfg, func(o *awss3.Options) {
+		o.BaseEndpoint = aws.String(server.URL)
+		o.UsePathStyle = true
+	})
+}
