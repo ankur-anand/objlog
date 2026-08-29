@@ -34,9 +34,13 @@ type segmentCacheEntry struct {
 }
 
 type segmentOpenCall struct {
-	done   chan struct{}
-	reader *segreader.Reader
-	err    error
+	ctx      context.Context
+	cancel   context.CancelCauseFunc
+	done     chan struct{}
+	waiters  int
+	finished bool
+	reader   *segreader.Reader
+	err      error
 }
 
 func NewSegmentReaderCache(maxEntries int) (*SegmentReaderCache, error) {
@@ -71,22 +75,23 @@ func (c *SegmentReaderCache) Open(ctx context.Context, store segreader.SegmentSt
 		return reader, nil
 	}
 
-	call, leader := c.begin(key)
-	if !leader {
-		select {
-		case <-call.done:
-			return call.reader, call.err
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+	call, leader := c.begin(ctx, key)
+	if leader {
+		go c.run(key, call, store, ref, opts)
 	}
+	return c.wait(ctx, key, call)
+}
 
-	reader, err := segreader.Open(ctx, store, ref, opts)
+func (c *SegmentReaderCache) run(key segmentCacheKey, call *segmentOpenCall, store segreader.SegmentStore, ref pmeta.SegmentRef, opts segreader.Options) {
+	reader, err := segreader.Open(call.ctx, store, ref, opts)
 	if err == nil {
 		c.set(key, reader)
 	}
+	if cause := context.Cause(call.ctx); cause != nil {
+		reader = nil
+		err = cause
+	}
 	c.finish(key, call, reader, err)
-	return reader, err
 }
 
 func (c *SegmentReaderCache) Len() int {
@@ -150,34 +155,71 @@ func (c *SegmentReaderCache) set(key segmentCacheKey, reader *segreader.Reader) 
 	}
 }
 
-func (c *SegmentReaderCache) begin(key segmentCacheKey) (*segmentOpenCall, bool) {
+func (c *SegmentReaderCache) begin(ctx context.Context, key segmentCacheKey) (*segmentOpenCall, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if elem, ok := c.items[key]; ok {
 		c.ll.MoveToFront(elem)
 		return &segmentOpenCall{
-			done:   closedChannel(),
-			reader: elem.Value.(*segmentCacheEntry).reader,
+			done:     closedChannel(),
+			waiters:  1,
+			finished: true,
+			reader:   elem.Value.(*segmentCacheEntry).reader,
 		}, false
 	}
 	if call, ok := c.inflight[key]; ok {
+		call.waiters++
 		return call, false
 	}
-	call := &segmentOpenCall{done: make(chan struct{})}
+	callCtx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	call := &segmentOpenCall{
+		ctx:     callCtx,
+		cancel:  cancel,
+		done:    make(chan struct{}),
+		waiters: 1,
+	}
 	c.inflight[key] = call
 	return call, true
 }
 
+func (c *SegmentReaderCache) wait(ctx context.Context, key segmentCacheKey, call *segmentOpenCall) (*segreader.Reader, error) {
+	select {
+	case <-call.done:
+		c.releaseWaiter(key, call)
+		return call.reader, call.err
+	case <-ctx.Done():
+		c.releaseWaiter(key, call)
+		return nil, ctx.Err()
+	}
+}
+
+func (c *SegmentReaderCache) releaseWaiter(key segmentCacheKey, call *segmentOpenCall) {
+	var cancel bool
+	c.mu.Lock()
+	call.waiters--
+	if call.waiters == 0 && !call.finished {
+		if c.inflight[key] == call {
+			delete(c.inflight, key)
+		}
+		cancel = true
+	}
+	c.mu.Unlock()
+	if cancel {
+		call.cancel(context.Canceled)
+	}
+}
+
 func (c *SegmentReaderCache) finish(key segmentCacheKey, call *segmentOpenCall, reader *segreader.Reader, err error) {
 	c.mu.Lock()
+	call.reader = reader
+	call.err = err
+	call.finished = true
 	if current := c.inflight[key]; current == call {
 		delete(c.inflight, key)
 	}
-	c.mu.Unlock()
-
-	call.reader = reader
-	call.err = err
 	close(call.done)
+	c.mu.Unlock()
+	call.cancel(context.Canceled)
 }
 
 func closedChannel() chan struct{} {

@@ -32,9 +32,13 @@ type Store struct {
 var _ segreader.SegmentStore = (*Store)(nil)
 
 type inflightRead struct {
-	done chan struct{}
-	body []byte
-	err  error
+	ctx      context.Context
+	cancel   context.CancelCauseFunc
+	done     chan struct{}
+	waiters  int
+	finished bool
+	body     []byte
+	err      error
 }
 
 func NewStore(inner segreader.SegmentStore, cache Cache) (*Store, error) {
@@ -71,31 +75,26 @@ func (s *Store) ReadAt(ctx context.Context, uri string, off uint64, n uint64) ([
 		return body, nil
 	}
 
-	call, leader := s.begin(key)
-	if !leader {
-		select {
-		case <-call.done:
-			if call.err != nil {
-				return nil, call.err
-			}
-			return append([]byte(nil), call.body...), nil
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+	call, leader := s.begin(ctx, key)
+	if leader {
+		go s.run(key, call, uri, off, n)
 	}
+	return s.wait(ctx, key, call)
+}
 
-	body, err := s.inner.ReadAt(ctx, uri, off, n)
+func (s *Store) run(key Key, call *inflightRead, uri string, off uint64, n uint64) {
+	body, err := s.inner.ReadAt(call.ctx, uri, off, n)
 	if err == nil && uint64(len(body)) != n {
 		err = fmt.Errorf("blob/cache: short range read uri=%q offset=%d length=%d got=%d", uri, off, n, len(body))
 	}
 	if err == nil {
 		s.cache.Set(key, body)
 	}
-	s.finish(key, call, body, err)
-	if err != nil {
-		return nil, err
+	if cause := context.Cause(call.ctx); cause != nil {
+		body = nil
+		err = cause
 	}
-	return append([]byte(nil), body...), nil
+	s.finish(key, call, body, err)
 }
 
 // ClearRangeCache releases cached ranges when the configured cache supports
@@ -106,27 +105,65 @@ func (s *Store) ClearRangeCache() {
 	}
 }
 
-func (s *Store) begin(key Key) (*inflightRead, bool) {
+func (s *Store) begin(ctx context.Context, key Key) (*inflightRead, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if call, ok := s.inflight[key]; ok {
+		call.waiters++
 		return call, false
 	}
-	call := &inflightRead{done: make(chan struct{})}
+	callCtx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	call := &inflightRead{
+		ctx:     callCtx,
+		cancel:  cancel,
+		done:    make(chan struct{}),
+		waiters: 1,
+	}
 	s.inflight[key] = call
 	return call, true
 }
 
+func (s *Store) wait(ctx context.Context, key Key, call *inflightRead) ([]byte, error) {
+	select {
+	case <-call.done:
+		s.releaseWaiter(key, call)
+		if call.err != nil {
+			return nil, call.err
+		}
+		return append([]byte(nil), call.body...), nil
+	case <-ctx.Done():
+		s.releaseWaiter(key, call)
+		return nil, ctx.Err()
+	}
+}
+
+func (s *Store) releaseWaiter(key Key, call *inflightRead) {
+	var cancel bool
+	s.mu.Lock()
+	call.waiters--
+	if call.waiters == 0 && !call.finished {
+		if s.inflight[key] == call {
+			delete(s.inflight, key)
+		}
+		cancel = true
+	}
+	s.mu.Unlock()
+	if cancel {
+		call.cancel(context.Canceled)
+	}
+}
+
 func (s *Store) finish(key Key, call *inflightRead, body []byte, err error) {
 	s.mu.Lock()
+	call.body = append([]byte(nil), body...)
+	call.err = err
+	call.finished = true
 	if current := s.inflight[key]; current == call {
 		delete(s.inflight, key)
 	}
-	s.mu.Unlock()
-
-	call.body = append([]byte(nil), body...)
-	call.err = err
 	close(call.done)
+	s.mu.Unlock()
+	call.cancel(context.Canceled)
 }
 
 type LRU struct {
