@@ -184,6 +184,17 @@ func (w *Writer) Append(ctx context.Context, record Record) (AppendResult, error
 		return AppendResult{}, err
 	}
 	recordSize := uint64(recordSizeInt)
+	recordEstimate := estimateInflightBytes(recordSize, 1, w.opts.SegmentOptions.Codec)
+	if w.opts.Queue.MaxInflightBytes > 0 && recordEstimate > w.opts.Queue.MaxInflightBytes {
+		err := fmt.Errorf(
+			"%w: reservation bytes=%d exceeds max_inflight_bytes=%d",
+			ErrRecordExceedsInflightBudget,
+			recordEstimate,
+			w.opts.Queue.MaxInflightBytes,
+		)
+		w.mu.Unlock()
+		return AppendResult{}, err
+	}
 	if w.shouldCutBeforeLocked(recordSize) {
 		if err := w.cutLocked(ctx); err != nil {
 			err = w.surfaceReturnedErrLocked(err)
@@ -754,6 +765,9 @@ func (w *Writer) cutLocked(ctx context.Context) error {
 	old := w.active
 	estBytes := estimateInflightBytes(old.rawBytes, old.records, w.opts.SegmentOptions.Codec)
 	if err := w.reserveInflightLocked(ctx, 1, estBytes); err != nil {
+		if errors.Is(err, errReservationExceedsLimit) {
+			w.failAsyncLocked(err)
+		}
 		return err
 	}
 	if err := w.startSegmentLocked(ctx); err != nil {
@@ -794,6 +808,9 @@ func (w *Writer) detachActiveLocked(ctx context.Context) error {
 	old := w.active
 	estBytes := estimateInflightBytes(old.rawBytes, old.records, w.opts.SegmentOptions.Codec)
 	if err := w.reserveInflightLocked(ctx, 1, estBytes); err != nil {
+		if errors.Is(err, errReservationExceedsLimit) {
+			w.failAsyncLocked(err)
+		}
 		return err
 	}
 	w.active = nil
@@ -883,10 +900,10 @@ func (w *Writer) shouldCutAfterLocked() bool {
 
 func (w *Writer) reserveInflightLocked(ctx context.Context, segments int, bytes uint64) error {
 	if w.opts.Queue.MaxInflightSegments > 0 && segments > w.opts.Queue.MaxInflightSegments {
-		return fmt.Errorf("%w: reservation segments=%d exceeds max_inflight_segments=%d", ErrInvalidOptions, segments, w.opts.Queue.MaxInflightSegments)
+		return fmt.Errorf("%w: %w: reservation segments=%d exceeds max_inflight_segments=%d", ErrInvalidOptions, errReservationExceedsLimit, segments, w.opts.Queue.MaxInflightSegments)
 	}
 	if w.opts.Queue.MaxInflightBytes > 0 && bytes > w.opts.Queue.MaxInflightBytes {
-		return fmt.Errorf("%w: reservation bytes=%d exceeds max_inflight_bytes=%d", ErrInvalidOptions, bytes, w.opts.Queue.MaxInflightBytes)
+		return fmt.Errorf("%w: %w: reservation bytes=%d exceeds max_inflight_bytes=%d", ErrInvalidOptions, errReservationExceedsLimit, bytes, w.opts.Queue.MaxInflightBytes)
 	}
 	for {
 		if err := w.abortedErrLocked(); err != nil {
@@ -1028,13 +1045,23 @@ func (w *Writer) surfaceReturnedErrLocked(err error) error {
 }
 
 func (w *Writer) failLocked(err error) {
+	w.failWithSurfaceLocked(err, true)
+}
+
+func (w *Writer) failAsyncLocked(err error) {
+	w.failWithSurfaceLocked(err, false)
+}
+
+func (w *Writer) failWithSurfaceLocked(err error, surfaced bool) {
 	if err == nil {
 		return
 	}
 	if w.firstErr == nil {
 		w.firstErr = err
 	}
-	w.firstErrSurface = true
+	if surfaced {
+		w.firstErrSurface = true
+	}
 	w.aborted = true
 	active := w.active
 	detached := append([]detachedSegment(nil), w.detached...)
@@ -1398,13 +1425,24 @@ func normalizeOptions(opts Options, snapshot Snapshot) (Options, error) {
 	if err := validateSnapshot(snapshot); err != nil {
 		return Options{}, err
 	}
+	return normalizeOptionsForPartition(opts, snapshot.Head.Partition)
+}
+
+// ValidateOptionsForPartition validates all writer construction options that
+// do not depend on an acquired catalog session.
+func ValidateOptionsForPartition(opts Options, partition uint32) error {
+	_, err := normalizeOptionsForPartition(opts, partition)
+	return err
+}
+
+func normalizeOptionsForPartition(opts Options, partition uint32) (Options, error) {
 	if opts.SinkFactory == nil {
 		return Options{}, fmt.Errorf("%w: sink factory is nil", ErrInvalidOptions)
 	}
 	if isZeroSegmentOptions(opts.SegmentOptions) {
-		opts.SegmentOptions = segwriter.DefaultOptions(snapshot.Head.Partition)
+		opts.SegmentOptions = segwriter.DefaultOptions(partition)
 	}
-	opts.SegmentOptions.Partition = snapshot.Head.Partition
+	opts.SegmentOptions.Partition = partition
 	if opts.Roll.MaxSegmentRecords == 0 {
 		opts.Roll.MaxSegmentRecords = DefaultMaxSegmentRecords
 	}

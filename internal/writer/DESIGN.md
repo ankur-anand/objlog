@@ -97,6 +97,7 @@ type AppendResult struct {
 }
 
 func DefaultOptions(factory SinkFactory) Options
+func ValidateOptionsForPartition(opts Options, partition uint32) error
 func New(opts Options) (*Writer, error)
 
 func (w *Writer) Append(ctx context.Context, r Record) (AppendResult, error)
@@ -113,6 +114,12 @@ func (w *Writer) Err() error
 Calls that mutate `Writer` are serialized by one owner per partition, typically
 a partition actor or mailbox. `State`, `Err`, and `Committed` may be used by
 observer goroutines.
+
+`ValidateOptionsForPartition` applies the same option defaults and cross-field
+checks as `New`, but does not require a catalog session. Public glue calls it
+before acquiring a writer fence so caller-controlled option errors cannot evict
+an existing writer. `New` repeats the validation against the partition returned
+by the acquired session.
 
 ## Session Contract
 
@@ -237,25 +244,38 @@ context ends; a later `Close` or `Abort` joins the same drain.
 1. rejects `closed` or `aborted` state;
 2. rejects LSN exhaustion;
 3. rejects timestamp regression;
-4. performs a policy-driven `Cut()` if the next record cannot fit in the
+4. validates the record and rejects it with
+   `ErrRecordExceedsInflightBudget` if its conservative one-record estimate
+   cannot fit in `MaxInflightBytes`;
+5. performs a policy-driven `Cut()` if the next record cannot fit in the
    current active segment;
-5. starts the active segment lazily if none exists;
-6. appends the record to the active `segwriter.Writer`;
-7. advances optimistic LSN and timestamp state;
-8. may perform a post-append `Cut()` if the active segment has reached the
+6. starts the active segment lazily if none exists;
+7. appends the record to the active `segwriter.Writer`;
+8. advances optimistic LSN and timestamp state;
+9. may perform a post-append `Cut()` if the active segment has reached the
    configured policy limit.
+
+`ErrRecordExceedsInflightBudget` is a foreground, non-terminal rejection. The
+record has not been accepted, no active-segment or timestamp state has changed,
+and the optimistic next LSN remains available for a later append.
 
 `Append` returns after local acceptance and LSN assignment. It does not wait
 for finalize or publish completion except when bounded in-flight backpressure
 blocks a cut.
 
-Post-append cut is best-effort. If the record has already been accepted and the
-post-append cut cannot reserve capacity or start the next segment, `Append`
-still returns success for the accepted record. The active segment remains in
-place, and the next `Append`, `Cut`, `Flush`, or `Close` retries the boundary
-before moving on.
+Post-append cut is best-effort for retryable failures. If the record has already
+been accepted and the post-append cut is interrupted by the caller context or
+cannot start the next segment, `Append` still returns success for the accepted
+record. The active segment remains in place, and the next `Append`, `Cut`,
+`Flush`, or `Close` retries the boundary before moving on.
 
-If `Append` fails before a new active segment is started, it returns
+A reservation request larger than its configured segment or byte limit is not
+retryable: validated options and pre-acceptance record admission make that
+state impossible during normal use. If a cut or detach nevertheless observes
+it, the writer records the invariant failure asynchronously and enters terminal
+drain instead of retrying the same boundary forever.
+
+If starting a new active segment fails, `Append` returns
 `ErrSegmentStartFailed` and the writer remains usable.
 
 ## Roll Policy
@@ -355,9 +375,13 @@ Rules:
 
 - `New` rejects a configuration whose maximum segment estimate cannot fit in
   `MaxInflightBytes`;
+- `Append` rejects a record before acceptance when its one-record estimate
+  cannot fit in `MaxInflightBytes`;
 - capacity must be reserved before `Cut` swaps the active segment;
 - `Append` that requires a cut blocks when in-flight capacity is exhausted;
 - explicit `Cut(ctx)` also blocks when in-flight capacity is exhausted;
+- a reservation larger than the configured limit is an invariant failure and
+  makes the writer terminal;
 - waits respect `ctx.Done()`.
 
 This keeps memory and orphan risk bounded while preserving throughput under
@@ -436,6 +460,8 @@ Any mismatch is `ErrInvalidPublishResult` and is terminal.
 - append-path swap before background finalize;
 - ordered publish in cut sequence;
 - committed head advances only through successful publish;
+- every accepted record can fit in a one-record in-flight reservation;
+- an impossible reservation is terminal rather than indefinitely retryable;
 - terminal-on-hard-failure behavior.
 
 ## Error Contract
@@ -448,6 +474,7 @@ Construction errors:
 
 Foreground write errors:
 
+- `ErrRecordExceedsInflightBudget`
 - `ErrSegmentStartFailed`
 - `ErrTimestampOrder`
 - `ErrLSNExhausted`
@@ -473,6 +500,9 @@ Context-sensitive waits may also return:
 
 Rules:
 
+- `ErrRecordExceedsInflightBudget` is non-terminal, means the record was not
+  accepted, leaves the optimistic next LSN unchanged, and permits a later
+  append to reuse that LSN;
 - `ErrSegmentStartFailed` is retryable and does not make the writer terminal;
 - when `Append` returns the caller's `context.Canceled` or
   `context.DeadlineExceeded` directly from a local wait, the record was not
@@ -483,6 +513,8 @@ Rules:
 - `ErrSegmentCommitIndeterminate` also matches `ErrSegmentWriteFailed`, but
   specifically means that the final segment object may already be durable and
   must not be treated as a definite failed object creation;
+- a cut or detach that encounters a reservation larger than its configured
+  limit records that invariant violation as the first terminal cause;
 - an asynchronous finalize or publish failure is recorded and returned by the
   next foreground call once;
 - `Err()` returns the first terminal cause.

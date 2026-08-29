@@ -117,6 +117,48 @@ func TestReclaimerDoesNotStrandEligiblePageBehindSpanningRange(t *testing.T) {
 	assertMissing(t, backend, wideLeaf, wideIndex)
 }
 
+func TestReclaimerResetsPageCursorWhenFloorAdvances(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	backend := blobmemory.New()
+	layout := segmentsink.NewLayout("root")
+	clock := newFakeClock(time.Now().UTC())
+	catalog := &fakeCatalog{snapshot: maintenanceSnapshot(200, 300, 2, 1)}
+	r := newTestReclaimer(t, backend, catalog, layout, clock, Options{})
+
+	const pageID = "0123456789abcdef0123456789abcdef"
+	levelZero := catalogblob.LeafPagePath("root/catalog", testStreamID, 7, 100, 150, 2, pageID)
+	levelOne := catalogblob.IndexPagePath("root/catalog", testStreamID, 7, 1, 100, 150, 2, pageID)
+	putKeys(t, backend, []string{levelZero, levelOne})
+
+	state := stateFile{
+		Version: stateVersion, StreamID: testStreamID, Partition: 7,
+		SafeFloorLSN: 100, PendingFloorLSN: 200,
+		PendingSinceMS:  clock.Now().Add(-DefaultDeleteDelay - time.Millisecond).UnixMilli(),
+		HasPendingFloor: true, RetentionVersion: 1,
+		SegmentReclaimedThroughLSN: 100, PageReclaimedThroughLSN: 100,
+		PageLevel: 1,
+	}
+	body, err := marshalState(state, testStreamID, 7)
+	if err != nil {
+		t.Fatalf("marshalState() error = %v", err)
+	}
+	path := catalogblob.GCStatePath("root/catalog", testStreamID, 7)
+	if _, swapped, err := backend.CompareAndSwap(ctx, path, "", body); err != nil || !swapped {
+		t.Fatalf("seed state swapped=%v error=%v", swapped, err)
+	}
+
+	result, err := r.RunPartition(ctx, 7)
+	if err != nil {
+		t.Fatalf("RunPartition() error = %v", err)
+	}
+	if result.SafeFloorLSN != 200 || result.ReclaimedThroughLSN != 200 || result.DeletedObjects != 2 || result.HasMore {
+		t.Fatalf("RunPartition() result = %+v, want both page levels reclaimed", result)
+	}
+	assertMissing(t, backend, levelZero, levelOne)
+}
+
 func TestReclaimerResumesAfterDeleteFailureUsingLastObjectKey(t *testing.T) {
 	t.Parallel()
 
