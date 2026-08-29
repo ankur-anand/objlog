@@ -159,6 +159,50 @@ func TestStoreCoalescesConcurrentReads(t *testing.T) {
 	}
 }
 
+func TestStoreLeaderCancellationDoesNotPoisonFollower(t *testing.T) {
+	t.Parallel()
+
+	inner := &blockingStore{
+		body:    []byte("abcdef"),
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	store, err := NewStore(inner, NewLRU(1024))
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, err := store.ReadAt(leaderCtx, "segment", 1, 3)
+		leaderDone <- err
+	}()
+	waitForSignal(t, inner.entered, "leader range read")
+
+	followerDone := make(chan readResult, 1)
+	go func() {
+		body, err := store.ReadAt(context.Background(), "segment", 1, 3)
+		followerDone <- readResult{body: body, err: err}
+	}()
+	waitForReadWaiters(t, store, Key{URI: "segment", Off: 1, N: 3}, 2)
+	cancelLeader()
+	if err := waitForError(t, leaderDone); !errors.Is(err, context.Canceled) {
+		t.Fatalf("leader ReadAt() error = %v, want context.Canceled", err)
+	}
+	close(inner.release)
+	result := waitForReadResult(t, followerDone)
+	if result.err != nil {
+		t.Fatalf("follower ReadAt() error = %v", result.err)
+	}
+	if string(result.body) != "bcd" {
+		t.Fatalf("follower ReadAt() = %q, want bcd", result.body)
+	}
+	if got := inner.reads(); got != 1 {
+		t.Fatalf("inner reads = %d, want 1", got)
+	}
+}
+
 func TestLRUEvictsByByteBudget(t *testing.T) {
 	t.Parallel()
 
@@ -203,6 +247,89 @@ type countingStore struct {
 	objects map[string][]byte
 	counts  map[Key]int
 	delay   time.Duration
+}
+
+type blockingStore struct {
+	mu      sync.Mutex
+	body    []byte
+	entered chan struct{}
+	release chan struct{}
+	count   int
+	once    sync.Once
+}
+
+func (s *blockingStore) ReadAt(ctx context.Context, _ string, off uint64, n uint64) ([]byte, error) {
+	s.mu.Lock()
+	s.count++
+	s.mu.Unlock()
+	s.once.Do(func() { close(s.entered) })
+	select {
+	case <-s.release:
+		return append([]byte(nil), s.body[off:off+n]...), nil
+	case <-ctx.Done():
+		return nil, context.Cause(ctx)
+	}
+}
+
+func (s *blockingStore) reads() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.count
+}
+
+type readResult struct {
+	body []byte
+	err  error
+}
+
+func waitForReadWaiters(t *testing.T, store *Store, key Key, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		store.mu.Lock()
+		call := store.inflight[key]
+		got := 0
+		if call != nil {
+			got = call.waiters
+		}
+		store.mu.Unlock()
+		if got == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d range-read waiters", want)
+}
+
+func waitForSignal(t *testing.T, signal <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", name)
+	}
+}
+
+func waitForError(t *testing.T, result <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for error result")
+		return nil
+	}
+}
+
+func waitForReadResult(t *testing.T, result <-chan readResult) readResult {
+	t.Helper()
+	select {
+	case got := <-result:
+		return got
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for range-read result")
+		return readResult{}
+	}
 }
 
 func newCountingStore(objects map[string][]byte) *countingStore {
