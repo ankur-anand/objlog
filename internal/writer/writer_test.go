@@ -1080,8 +1080,84 @@ func TestWriterRejectsInflightBudgetBelowMaximumSegmentEstimate(t *testing.T) {
 		MaxInflightSegments: 1,
 		MaxInflightBytes:    uint64(segformat.RecordHeaderSize + 1),
 	}
+	if err := ValidateOptionsForPartition(opts, 1); !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("ValidateOptionsForPartition() error = %v, want %v", err, ErrInvalidOptions)
+	}
 	if _, err := New(opts); !errors.Is(err, ErrInvalidOptions) {
 		t.Fatalf("New() error = %v, want %v", err, ErrInvalidOptions)
+	}
+}
+
+func TestWriterRejectsRecordExceedingInflightBudgetBeforeAcceptance(t *testing.T) {
+	t.Parallel()
+
+	opts := testOptions(t, catalog.NewMemoryCatalog(), newMemorySegmentFactory())
+	opts.Roll.MaxSegmentRecords = 4
+	opts.Roll.MaxSegmentRawBytes = 128
+	opts.Queue.MaxInflightBytes = estimateInflightBytes(
+		opts.Roll.MaxSegmentRawBytes,
+		opts.Roll.MaxSegmentRecords,
+		opts.SegmentOptions.Codec,
+	)
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = w.Abort(context.Background()) }()
+
+	if result, err := w.Append(context.Background(), Record{TimestampMS: 10, Value: []byte("a")}); err != nil || result.LSN != 0 {
+		t.Fatalf("Append(first) = (%+v, %v), want LSN 0", result, err)
+	}
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 11, Value: make([]byte, 1024)}); !errors.Is(err, ErrRecordExceedsInflightBudget) {
+		t.Fatalf("Append(oversized) error = %v, want %v", err, ErrRecordExceedsInflightBudget)
+	}
+	if err := w.Err(); err != nil {
+		t.Fatalf("Err() after rejected record = %v, want nil", err)
+	}
+	if got := w.State().OptimisticNextLSN; got != 1 {
+		t.Fatalf("OptimisticNextLSN after rejected record = %d, want 1", got)
+	}
+	if result, err := w.Append(context.Background(), Record{TimestampMS: 11, Value: []byte("b")}); err != nil || result.LSN != 1 {
+		t.Fatalf("Append(after rejection) = (%+v, %v), want LSN 1", result, err)
+	}
+
+	snapshot, err := w.Flush(context.Background())
+	if err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	if snapshot.Head.NextLSN != 2 || snapshot.Head.SegmentCount != 1 {
+		t.Fatalf("Flush() head = %+v, want next_lsn=2 segment_count=1", snapshot.Head)
+	}
+}
+
+func TestWriterImpossibleReservationBecomesTerminal(t *testing.T) {
+	t.Parallel()
+
+	w, err := New(testOptions(t, catalog.NewMemoryCatalog(), newMemorySegmentFactory()))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	changed := w.Committed()
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 10, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+
+	// Simulate an invariant regression after construction. Validated options and
+	// record admission prevent this state in normal use.
+	w.opts.Queue.MaxInflightBytes = 1
+	if err := w.Cut(context.Background()); !errors.Is(err, errReservationExceedsLimit) {
+		t.Fatalf("Cut() error = %v, want reservation limit error", err)
+	}
+	if err := w.Err(); !errors.Is(err, errReservationExceedsLimit) {
+		t.Fatalf("Err() = %v, want reservation limit error", err)
+	}
+	select {
+	case <-changed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal reservation failure did not close committed notification")
+	}
+	if err := w.Abort(context.Background()); err != nil {
+		t.Fatalf("Abort() error = %v", err)
 	}
 }
 

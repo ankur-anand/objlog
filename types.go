@@ -107,7 +107,9 @@ type BackpressurePolicy struct {
 	// MaxPendingBatches limits how many cut batches may wait in the background.
 	MaxPendingBatches int
 
-	// MaxPendingBytes limits estimated bytes across pending cut batches.
+	// MaxPendingBytes limits estimated bytes across pending cut batches. Append
+	// rejects a record before acceptance when its conservative one-record
+	// estimate cannot fit within this budget.
 	MaxPendingBytes uint64
 }
 

@@ -30,7 +30,13 @@ type Options struct {
 	Clock Clock
 }
 
-var ErrLogClosed = errors.New("objlog: log closed")
+var (
+	ErrLogClosed = errors.New("objlog: log closed")
+	// ErrRecordExceedsPendingBudget indicates that Append rejected a record
+	// before acceptance because its conservative one-record estimate cannot fit
+	// within BackpressurePolicy.MaxPendingBytes.
+	ErrRecordExceedsPendingBudget = lowwriter.ErrRecordExceedsInflightBudget
+)
 
 // ReaderOptions configures the default reader created by Open.
 type ReaderOptions struct {
@@ -249,6 +255,9 @@ func (l *Log) OpenWriter(ctx context.Context, opts WriterOptions) (*Writer, erro
 	}
 	if l.metrics != nil {
 		wopts.Observer = writerMetricsAdapter{metrics: l.metrics}
+	}
+	if err := lowwriter.ValidateOptionsForPartition(wopts, opts.Partition); err != nil {
+		return nil, err
 	}
 
 	catalogSession, err := catalogWriterManager.OpenWriter(ctx, opts.Partition, opts.WriterID)

@@ -238,6 +238,11 @@ func (r *Reclaimer) observeHead(state *stateFile, snapshot catalogblob.Maintenan
 	}
 	if state.HasPendingFloor && !now.Before(time.UnixMilli(state.PendingSinceMS).Add(r.opts.DeleteDelay)) {
 		state.SafeFloorLSN = state.PendingFloorLSN
+		// A page sweep is ordered by catalog level and then page end. Pages in
+		// lower levels that were beyond the old floor may become eligible now,
+		// so a promoted floor must restart the sweep from level zero.
+		state.PageLevel = 0
+		state.PageAfterKey = ""
 		state.PendingFloorLSN = 0
 		state.PendingSinceMS = 0
 		state.HasPendingFloor = false

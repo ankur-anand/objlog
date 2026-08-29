@@ -115,7 +115,9 @@ type RollPolicy struct {
 type QueuePolicy struct {
 	MaxInflightSegments int
 	// MaxInflightBytes must fit the conservative reservation estimate for one
-	// maximum-sized segment under the configured roll policy and codec.
+	// maximum-sized segment under the configured roll policy and codec. Records
+	// whose one-record estimate exceeds this budget are rejected before
+	// acceptance.
 	MaxInflightBytes uint64
 }
 

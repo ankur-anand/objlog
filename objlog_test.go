@@ -475,6 +475,93 @@ func TestLogOpenWriterRejectsInvalidPublicWriterOptions(t *testing.T) {
 	}
 }
 
+func TestLogOpenWriterInvalidOptionsDoNotFenceLiveWriter(t *testing.T) {
+	store := newTestStore(t)
+	log, err := Open(Options{Store: store})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	live, err := log.OpenWriter(context.Background(), WriterOptions{
+		Partition: 7,
+		WriterID:  [16]byte{1},
+	})
+	if err != nil {
+		t.Fatalf("OpenWriter(live) error = %v", err)
+	}
+	defer func() { _ = live.Abort(context.Background()) }()
+	if _, err := live.Append(context.Background(), Record{TimestampMS: 10, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append(live) error = %v", err)
+	}
+
+	if _, err := log.OpenWriter(context.Background(), WriterOptions{
+		Partition: 7,
+		WriterID:  [16]byte{2},
+		Batch: BatchPolicy{
+			MaxBytes: 64 << 20,
+		},
+		Backpressure: BackpressurePolicy{
+			MaxPendingBytes: 1 << 20,
+		},
+	}); !errors.Is(err, writer.ErrInvalidOptions) {
+		t.Fatalf("OpenWriter(invalid replacement) error = %v, want %v", err, writer.ErrInvalidOptions)
+	}
+
+	snapshot, err := live.Flush(context.Background())
+	if err != nil {
+		t.Fatalf("Flush(live after rejected replacement) error = %v", err)
+	}
+	if snapshot.Head.NextLSN != 1 || snapshot.Head.WriterEpoch != 1 {
+		t.Fatalf("Flush(live after rejected replacement) head = %+v, want next_lsn=1 writer_epoch=1", snapshot.Head)
+	}
+}
+
+func TestLogWriterRejectsRecordExceedingPendingBudgetBeforeAcceptance(t *testing.T) {
+	log, err := Open(Options{Store: newTestStore(t)})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	w, err := log.OpenWriter(context.Background(), WriterOptions{
+		Partition: 8,
+		WriterID:  [16]byte{1},
+		Batch: BatchPolicy{
+			MaxBytes:   128,
+			MaxRecords: 4,
+		},
+		Backpressure: BackpressurePolicy{
+			MaxPendingBytes: 1024,
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenWriter() error = %v", err)
+	}
+	defer func() { _ = w.Abort(context.Background()) }()
+
+	if result, err := w.Append(context.Background(), Record{TimestampMS: 10, Value: []byte("a")}); err != nil || result.LSN != 0 {
+		t.Fatalf("Append(first) = (%+v, %v), want LSN 0", result, err)
+	}
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 11, Value: make([]byte, 1024)}); !errors.Is(err, ErrRecordExceedsPendingBudget) {
+		t.Fatalf("Append(oversized) error = %v, want %v", err, ErrRecordExceedsPendingBudget)
+	}
+	if err := w.Err(); err != nil {
+		t.Fatalf("Err() after rejected record = %v, want nil", err)
+	}
+	if got := w.State().OptimisticNextLSN; got != 1 {
+		t.Fatalf("OptimisticNextLSN after rejected record = %d, want 1", got)
+	}
+	if result, err := w.Append(context.Background(), Record{TimestampMS: 11, Value: []byte("b")}); err != nil || result.LSN != 1 {
+		t.Fatalf("Append(after rejection) = (%+v, %v), want LSN 1", result, err)
+	}
+
+	snapshot, err := w.Flush(context.Background())
+	if err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	if snapshot.Head.NextLSN != 2 || snapshot.Head.SegmentCount != 1 {
+		t.Fatalf("Flush() head = %+v, want next_lsn=2 segment_count=1", snapshot.Head)
+	}
+}
+
 func TestLogWriterPipelineOptionsAreAccepted(t *testing.T) {
 	log, err := Open(Options{Store: newTestStore(t)})
 	if err != nil {

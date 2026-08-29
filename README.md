@@ -34,50 +34,6 @@ go get github.com/ankur-anand/objlog
 
 Go 1.25 or newer.
 
-## Try it first
-
-One command runs a full cycle against a local emulator. No docker, no
-credentials, no configuration — the GCS fake runs inside the demo process:
-
-```sh
-go run ./examples/demo -provider fake-gcs
-```
-
-```text
-1 · write        open a fenced writer, append records, flush to publish them
-2 · read         replay from an LSN, seek by timestamp, fetch one exact LSN
-3 · resume       save a cursor checkpoint as JSON, reopen it, carry on exactly
-4 · tail         follow the live tail while another goroutine appends and flushes
-5 · retention    request a boundary, let the writer apply it, watch old LSNs expire
-6 · gc           observe unreachable objects, wait the grace period, delete them
-```
-
-It narrates each step and ends with what actually happened in the bucket:
-
-```text
-── summary ─────────────────────────────────────────────────
-   objects         13 write → 16 tail → 17 retention → 12 gc
-                   tail +3 segments; retention +1 maintenance; gc -6 segments, +1 maintenance
-   bytes           7.7 KiB → 6.1 KiB (1.6 KiB reclaimed)
-   records         15 written (3 of them while a tailer followed) · 9 still readable, from LSN 6
-   stored in       bucket objlog-demo and nowhere else — no broker, no local state
-```
-
-The same demo runs against containers, so you can watch it in a real
-object store:
-
-```sh
-docker compose -f examples/docker-compose.yml up -d
-
-go run ./examples/demo -provider minio      # S3 API
-go run ./examples/demo -provider azurite    # Azure Blob
-STORAGE_EMULATOR_HOST=127.0.0.1:4443 \
-  go run ./examples/demo -provider fake-gcs # GCS
-```
-
-Add `-v` to print every object key and size as the bucket changes. Full
-transcript, flags, and provider wiring: [`examples/`](examples/).
-
 ## Usage
 
 Open a store for one bucket and stream, then open the log over it:
@@ -115,6 +71,8 @@ w, err := log.OpenWriter(ctx, objlog.WriterOptions{
         MaxRecords: 16_384,
     },
 })
+// A writer owns background goroutines and the partition fence. Closing the Log
+// does not close it, so always pair OpenWriter with Close or Abort.
 defer w.Abort(context.Background())
 
 appended, err := w.Append(ctx, objlog.Record{
@@ -211,6 +169,50 @@ before step 2 finds nothing to do.
 Nothing runs implicitly inside writers or readers. Partition discovery and the
 recurring schedule belong to the caller.
 
+## Try it first
+
+One command runs a full cycle against a local emulator. No docker, no
+credentials, no configuration — the GCS fake runs inside the demo process:
+
+```sh
+go run ./examples/demo -provider fake-gcs
+```
+
+```text
+1 · write        open a fenced writer, append records, flush to publish them
+2 · read         replay from an LSN, seek by timestamp, fetch one exact LSN
+3 · resume       save a cursor checkpoint as JSON, reopen it, carry on exactly
+4 · tail         follow the live tail while another goroutine appends and flushes
+5 · retention    request a boundary, let the writer apply it, watch old LSNs expire
+6 · gc           observe unreachable objects, wait the grace period, delete them
+```
+
+It narrates each step and ends with what actually happened in the bucket:
+
+```text
+── summary ─────────────────────────────────────────────────
+   objects         13 write → 16 tail → 17 retention → 12 gc
+                   tail +3 segments; retention +1 maintenance; gc -6 segments, +1 maintenance
+   bytes           7.7 KiB → 6.1 KiB (1.6 KiB reclaimed)
+   records         15 written (3 of them while a tailer followed) · 9 still readable, from LSN 6
+   stored in       bucket objlog-demo and nowhere else — no broker, no local state
+```
+
+The same demo runs against containers, so you can watch it in a real
+object store:
+
+```sh
+docker compose -f examples/docker-compose.yml up -d
+
+go run ./examples/demo -provider minio      # S3 API
+go run ./examples/demo -provider azurite    # Azure Blob
+STORAGE_EMULATOR_HOST=127.0.0.1:4443 \
+  go run ./examples/demo -provider fake-gcs # GCS
+```
+
+Add `-v` to print every object key and size as the bucket changes. Full
+transcript, flags, and provider wiring: [`examples/`](examples/).
+
 ## How it works
 
 ```text
@@ -271,34 +273,40 @@ API is `objlog`, the one provider package you use, and `objlog/lifecycle`.
 
 ## Write a reader in any language
 
-The format is the interface, and it is specified rather than implied. Nothing
-about it is Go-specific: a reader in Rust, Python, Java, or C++ can list,
-range-read, and decode a stream straight out of the bucket without linking this
-library, running a sidecar, or calling a service. Object key derivation is part
-of the specification too, so a foreign reader can find the objects as well as
-parse them.
+You do not need this Go library to read an objlog stream. A foreign reader only
+needs an object-store client and the stream's configured catalog and segment
+prefixes. The read path is:
 
-Two byte-level formats, each versioned, each frozen by a checked-in conformance
-corpus:
+1. Derive the stream and partition prefixes from the rules in the catalog
+   specification.
+2. Read the catalog head and follow its page references to find the segment
+   covering the requested LSN (or timestamp).
+3. Derive or read that segment object's key, then range-read its trailer,
+   preamble, block index, and the blocks containing the requested records.
+4. Validate hashes, bounds, versions, and cross-references before returning
+   records.
+
+The wire formats and key grammar are language-neutral. They are versioned and
+frozen by checked-in specifications and conformance fixtures:
 
 | Format | Covers | Specification | Corpus |
 | --- | --- | --- | --- |
-| `segformat` v2 | segment objects: preamble, blocks, block index, records, trailer | [SPEC.md](internal/segformat/SPEC.md) | [`testdata/segformat/v2`](testdata/segformat/v2) |
-| `catformat` v1 | catalog objects: the mutable head, immutable leaf and index pages | [SPEC.md](internal/catalog/blob/SPEC.md) | [`testdata/catformat/v1`](testdata/catformat/v1) |
+| `segformat` v2 | Segment objects: preamble, blocks, block index, records, trailer | [segment specification](internal/segformat/SPEC.md) | [`testdata/segformat/v2`](testdata/segformat/v2) |
+| `catformat` v1 | Catalog head, immutable leaf pages, and index pages | [catalog specification](internal/catalog/blob/SPEC.md) | [`testdata/catformat/v1`](testdata/catformat/v1) |
 
-Both are big-endian, both reject an unknown version instead of guessing at it,
-and both ship a language-neutral `manifest.json` alongside the fixtures — the
-expected decode result, with 64-bit values as decimal strings, hashes as hex,
-and payloads as base64, so nothing is lost through a JSON float. LSNs above
-2^53 are in the corpus precisely because that is where naive JSON readers break.
+Both formats use big-endian fields and reject unknown versions. Each fixture
+directory includes a language-neutral `manifest.json` containing the expected
+decoded values. 64-bit integers are decimal strings, hashes are hexadecimal,
+and binary payloads are base64; this avoids JSON number precision loss. The
+fixtures deliberately include LSNs above 2^53, where JavaScript-style JSON
+numbers are no longer exact.
 
-A new implementation proves itself the same way the Go one does: verify each
-fixture's SHA-256, parse it against the spec, then compare every field with the
-manifest. Passing only the uncompressed vector is not enough — a complete reader
-clears both the CRC32C and the zstd/XXH64 fixtures. The Go decoder is fuzzed
-against the same corpus continuously, so the vectors stay honest.
+To validate an implementation, verify each fixture's SHA-256, decode it
+according to the relevant specification, and compare every field with the
+manifest. A complete segment reader must handle both fixture variants:
+uncompressed/CRC32C and zstd/XXH64. The compatibility documents describe the
+required checks and the conformance procedure:
 
-Conformance procedures:
 [`segformat`](internal/segformat/COMPATIBILITY.md) ·
 [`catformat`](internal/catalog/blob/COMPATIBILITY.md).
 
