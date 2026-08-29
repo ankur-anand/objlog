@@ -325,3 +325,9 @@ publish to the broker for live delivery, keep the durable history here.
 - [`internal/catalog/blob/SPEC.md`](internal/catalog/blob/SPEC.md) and
   [`COMPATIBILITY.md`](internal/catalog/blob/COMPATIBILITY.md) — catalog object
   bytes, key derivation, and its conformance procedure.
+
+## License
+
+[Apache-2.0](LICENSE). The format specifications and their conformance corpora
+are covered by the same licence, so a reader implemented in another language
+carries no additional restriction.
