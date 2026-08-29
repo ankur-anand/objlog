@@ -71,6 +71,8 @@ var (
 	ErrCheckpointInvalid   = plreader.ErrCheckpointInvalid
 	ErrCheckpointMismatch  = plreader.ErrCheckpointMismatch
 	ErrCheckpointAhead     = plreader.ErrCheckpointAhead
+	// ErrLSNExpired is what an LSNExpiredError unwraps to, for errors.Is.
+	ErrLSNExpired = plreader.ErrLSNExpired
 )
 
 // ConsumeRequest reads a bounded batch from one partition by LSN.

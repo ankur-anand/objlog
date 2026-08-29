@@ -1,2 +1,6 @@
 .gocache/
 .golangci-lint-cache/
+
+# stray binaries from "go build ./..."
+/demo
+/bin/

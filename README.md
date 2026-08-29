@@ -34,6 +34,50 @@ go get github.com/ankur-anand/objlog
 
 Go 1.25 or newer.
 
+## Try it first
+
+One command runs a full cycle against a local emulator. No docker, no
+credentials, no configuration — the GCS fake runs inside the demo process:
+
+```sh
+go run ./examples/demo -provider fake-gcs
+```
+
+```text
+1 · write        open a fenced writer, append records, flush to publish them
+2 · read         replay from an LSN, seek by timestamp, fetch one exact LSN
+3 · resume       save a cursor checkpoint as JSON, reopen it, carry on exactly
+4 · tail         follow the live tail while another goroutine appends and flushes
+5 · retention    request a boundary, let the writer apply it, watch old LSNs expire
+6 · gc           observe unreachable objects, wait the grace period, delete them
+```
+
+It narrates each step and ends with what actually happened in the bucket:
+
+```text
+── summary ─────────────────────────────────────────────────
+   objects         13 write → 16 tail → 17 retention → 12 gc
+                   tail +3 segments; retention +1 maintenance; gc -6 segments, +1 maintenance
+   bytes           7.7 KiB → 6.1 KiB (1.6 KiB reclaimed)
+   records         15 written (3 of them while a tailer followed) · 9 still readable, from LSN 6
+   stored in       bucket objlog-demo and nowhere else — no broker, no local state
+```
+
+The same demo runs against containers, so you can watch it in a real
+object store:
+
+```sh
+docker compose -f examples/docker-compose.yml up -d
+
+go run ./examples/demo -provider minio      # S3 API
+go run ./examples/demo -provider azurite    # Azure Blob
+STORAGE_EMULATOR_HOST=127.0.0.1:4443 \
+  go run ./examples/demo -provider fake-gcs # GCS
+```
+
+Add `-v` to print every object key and size as the bucket changes. Full
+transcript, flags, and provider wiring: [`examples/`](examples/).
+
 ## Usage
 
 Open a store for one bucket and stream, then open the log over it:
@@ -140,12 +184,29 @@ Logical retention and physical deletion are separate, and both are explicit:
 ```go
 import "github.com/ankur-anand/objlog/lifecycle"
 
+// 1. any process — record the boundary
+_, err := log.RequestRetention(ctx, objlog.RetentionRequest{
+    Partition: 7, PolicyVersion: 1, BeforeLSN: 1_000_000,
+})
+
+// 2. the partition's writer — apply it through the fence it already holds
+applied, err := writer.ApplyRetention(ctx)
+_ = applied.Snapshot.Head.OldestLSN
+
+// 3. any process, on its own schedule — delete what is now unreachable
 reclaimer, err := store.NewReclaimer(lifecycle.Options{DeleteDelay: 24 * time.Hour})
 scheduler, err := lifecycle.NewScheduler(reclaimer, lifecycle.SchedulerOptions{})
 summary, err := scheduler.Run(ctx, []lifecycle.Task{
     {Partition: 7, Operation: lifecycle.OperationReclaim},
 })
 ```
+
+Only step 2 goes through the writer, because only the fence holder may move the
+head. The reclaimer never opens a writer session: it takes its own lease in the
+bucket, so it can run as a separate maintenance process, a cron job, or a
+sidecar, as long as it points at the same store. It can only ever delete what
+the catalog head has already stopped referencing, so a reclaimer that runs
+before step 2 finds nothing to do.
 
 Nothing runs implicitly inside writers or readers. Partition discovery and the
 recurring schedule belong to the caller.
@@ -251,17 +312,13 @@ objlog is for history that is written once and reopened later: replay,
 reprocessing, audit, and per-partition retention you control. They compose —
 publish to the broker for live delivery, keep the durable history here.
 
-## Status
-
-Experimental. The storage engine runs on S3, GCS, Azure Blob, and MinIO with
-immutable segment publication, fenced writers, bounded catalog metadata,
-direct replay, retention, and garbage collection. The storage layout and the
-Go API may still change before a stable release.
-
 ## Docs
 
 - [`docs/usage.md`](docs/usage.md) — the library guide: writers, readers,
   cursors, tailing, retention, metrics.
+- [`examples/`](examples/) — the runnable demo above: write, read, cursor
+  resume, live tail, retention, and GC against MinIO, Azurite, or
+  fake-gcs-server, with a docker-compose for all three.
 - [`internal/segformat/SPEC.md`](internal/segformat/SPEC.md) and
   [`COMPATIBILITY.md`](internal/segformat/COMPATIBILITY.md) — segment object
   bytes and the conformance procedure.

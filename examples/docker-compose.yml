@@ -1,0 +1,38 @@
+# Local object storage emulators for the objlog demo.
+#
+#   docker compose -f examples/docker-compose.yml up -d
+#   go run ./examples/demo -provider minio
+#   go run ./examples/demo -provider azurite
+#   STORAGE_EMULATOR_HOST=127.0.0.1:4443 go run ./examples/demo -provider fake-gcs
+#   docker compose -f examples/docker-compose.yml down -v
+#
+# MinIO and Azurite are pinned to the same versions CI runs against.
+name: objlog-demo
+
+services:
+  # S3-compatible. The demo talks to it with the AWS SDK, path-style.
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # web console, http://127.0.0.1:9001
+
+  # Azure Blob emulator. Uses the well-known devstoreaccount1 credentials.
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:3.35.0
+    command: azurite-blob --blobHost 0.0.0.0
+    ports:
+      - "10000:10000"
+
+  # Google Cloud Storage emulator. Only needed if you want the demo to use a
+  # container - without STORAGE_EMULATOR_HOST the demo starts this same fake
+  # in-process instead.
+  fake-gcs:
+    image: fsouza/fake-gcs-server:1.53.1
+    command: -scheme http -host 0.0.0.0 -port 4443 -public-host 127.0.0.1:4443 -backend memory
+    ports:
+      - "4443:4443"
