@@ -6,6 +6,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/ankur-anand/objlog/internal/blobstore"
 	"github.com/ankur-anand/objlog/internal/catalog/blob"
 )
 
@@ -25,12 +26,96 @@ func Run(t *testing.T, cfg Config) {
 	t.Run("compare_and_swap", func(t *testing.T) {
 		runCompareAndSwap(t, cfg.newBackend(t), cfg.wrongToken)
 	})
+	t.Run("conditional_get", func(t *testing.T) {
+		runConditionalGet(t, cfg.newBackend(t))
+	})
 	t.Run("list_and_delete", func(t *testing.T) {
 		runListAndDelete(t, cfg.newBackend(t))
 	})
 	t.Run("bad_inputs", func(t *testing.T) {
 		runBadInputs(t, cfg.newBackend(t))
 	})
+}
+
+var benchmarkBody []byte
+
+func BenchmarkConditionalGet140KiB(b *testing.B, cfg Config) {
+	b.Helper()
+	backend := cfg.newBackend(b)
+	getter, ok := backend.(blobstore.ConditionalGetter)
+	if !ok {
+		b.Fatal("backend does not implement blobstore.ConditionalGetter")
+	}
+	ctx := context.Background()
+	body := bytes.Repeat([]byte{0xa5}, 140<<10)
+	created, swapped, err := backend.CompareAndSwap(ctx, "catalog/p00000001/head.plc", "", body)
+	if err != nil || !swapped {
+		b.Fatalf("CompareAndSwap(create) swapped=%v error=%v", swapped, err)
+	}
+
+	b.Run("unconditional", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ReportMetric(float64(len(body)), "body-B/op")
+		for i := 0; i < b.N; i++ {
+			object, err := backend.Get(ctx, created.Key)
+			if err != nil {
+				b.Fatal(err)
+			}
+			benchmarkBody = object.Body
+		}
+	})
+	b.Run("conditional_unchanged", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ReportMetric(0, "body-B/op")
+		for i := 0; i < b.N; i++ {
+			object, changed, err := getter.GetIfChanged(ctx, created.Key, created.Token)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if changed {
+				b.Fatal("unchanged object reported changed")
+			}
+			benchmarkBody = object.Body
+		}
+	})
+}
+
+func runConditionalGet(t *testing.T, backend blob.Backend) {
+	t.Helper()
+	getter, ok := backend.(blobstore.ConditionalGetter)
+	if !ok {
+		t.Fatal("backend does not implement blobstore.ConditionalGetter")
+	}
+	ctx := context.Background()
+	const key = "catalog/p00000001/head.plc"
+	created, swapped, err := backend.CompareAndSwap(ctx, key, "", []byte("generation-1"))
+	if err != nil || !swapped {
+		t.Fatalf("CompareAndSwap(create) object=%+v swapped=%v error=%v", created, swapped, err)
+	}
+
+	unchanged, changed, err := getter.GetIfChanged(ctx, key, created.Token)
+	if err != nil {
+		t.Fatalf("GetIfChanged(unchanged) error = %v", err)
+	}
+	if changed || unchanged.Token != created.Token || len(unchanged.Body) != 0 {
+		t.Fatalf("GetIfChanged(unchanged) object=%+v changed=%v", unchanged, changed)
+	}
+
+	updated, swapped, err := backend.CompareAndSwap(ctx, key, created.Token, []byte("generation-2"))
+	if err != nil || !swapped {
+		t.Fatalf("CompareAndSwap(update) object=%+v swapped=%v error=%v", updated, swapped, err)
+	}
+	loaded, changed, err := getter.GetIfChanged(ctx, key, created.Token)
+	if err != nil {
+		t.Fatalf("GetIfChanged(changed) error = %v", err)
+	}
+	if !changed || loaded.Token != updated.Token || !bytes.Equal(loaded.Body, updated.Body) {
+		t.Fatalf("GetIfChanged(changed) object=%+v changed=%v want=%+v", loaded, changed, updated)
+	}
+
+	if _, _, err := getter.GetIfChanged(ctx, "catalog/missing.plc", created.Token); !errors.Is(err, blob.ErrObjectNotFound) {
+		t.Fatalf("GetIfChanged(missing) error = %v, want %v", err, blob.ErrObjectNotFound)
+	}
 }
 
 func (c Config) newBackend(t testing.TB) blob.Backend {
@@ -218,6 +303,11 @@ func runBadInputs(t *testing.T, backend blob.Backend) {
 
 	if _, err := backend.Get(ctx, ""); !errors.Is(err, blob.ErrCorruptCatalog) {
 		t.Fatalf("Get(empty key) error = %v, want %v", err, blob.ErrCorruptCatalog)
+	}
+	if getter, ok := backend.(blobstore.ConditionalGetter); !ok {
+		t.Fatal("backend does not implement blobstore.ConditionalGetter")
+	} else if _, _, err := getter.GetIfChanged(ctx, "", "token"); !errors.Is(err, blob.ErrCorruptCatalog) {
+		t.Fatalf("GetIfChanged(empty key) error = %v, want %v", err, blob.ErrCorruptCatalog)
 	}
 	if _, err := backend.Put(ctx, "", []byte("x")); !errors.Is(err, blob.ErrCorruptCatalog) {
 		t.Fatalf("Put(empty key) error = %v, want %v", err, blob.ErrCorruptCatalog)

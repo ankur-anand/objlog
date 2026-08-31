@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"strconv"
+	"time"
 
 	"cloud.google.com/go/storage"
 	"github.com/ankur-anand/objlog/internal/blobstore"
@@ -21,6 +22,7 @@ type Backend struct {
 }
 
 var _ blobstore.Store = (*Backend)(nil)
+var _ blobstore.ConditionalGetter = (*Backend)(nil)
 
 func New(client *storage.Client, bucket string) (*Backend, error) {
 	if client == nil {
@@ -36,7 +38,54 @@ func (b *Backend) Get(ctx context.Context, key string) (blobstore.Object, error)
 	if key == "" {
 		return blobstore.Object{}, fmt.Errorf("%w: empty key", blobstore.ErrInvalidRequest)
 	}
-	r, err := b.client.Bucket(b.bucket).Object(key).NewReader(ctx)
+	return b.read(ctx, key, b.client.Bucket(b.bucket).Object(key), time.Time{})
+}
+
+func (b *Backend) GetIfChanged(ctx context.Context, key string, token string) (blobstore.Object, bool, error) {
+	if key == "" {
+		return blobstore.Object{}, false, fmt.Errorf("%w: empty key", blobstore.ErrInvalidRequest)
+	}
+	if token == "" {
+		object, err := b.Get(ctx, key)
+		return object, err == nil, err
+	}
+	previousGeneration, err := parseGeneration(token)
+	if err != nil {
+		return blobstore.Object{}, false, err
+	}
+	object := b.client.Bucket(b.bucket).Object(key)
+	for attempt := 0; attempt < 3; attempt++ {
+		attrs, err := object.If(storage.Conditions{GenerationNotMatch: previousGeneration}).Attrs(ctx)
+		if isNotModifiedError(err) {
+			return blobstore.Object{Key: key, Token: token}, false, nil
+		}
+		if err != nil {
+			return blobstore.Object{}, false, mapError(err)
+		}
+		// Some emulators ignore ifGenerationNotMatch. Comparing the returned
+		// generation preserves the no-body unchanged path in that case.
+		if attrs.Generation == previousGeneration {
+			return blobstore.Object{Key: key, Token: token, CreatedAt: attrs.Created}, false, nil
+		}
+
+		current := object.If(storage.Conditions{GenerationMatch: attrs.Generation})
+		body, err := b.read(ctx, key, current, attrs.Created)
+		if isPreconditionAPIError(err) {
+			continue
+		}
+		if err != nil {
+			return blobstore.Object{}, false, err
+		}
+		return body, true, nil
+	}
+	// A continuously moving object should degrade to an ordinary read rather
+	// than make a hot partition unavailable through repeated refresh failures.
+	current, err := b.Get(ctx, key)
+	return current, err == nil, err
+}
+
+func (b *Backend) read(ctx context.Context, key string, object *storage.ObjectHandle, createdAt time.Time) (blobstore.Object, error) {
+	r, err := object.NewReader(ctx)
 	if err != nil {
 		return blobstore.Object{}, mapError(err)
 	}
@@ -47,11 +96,15 @@ func (b *Backend) Get(ctx context.Context, key string) (blobstore.Object, error)
 		return blobstore.Object{}, err
 	}
 	attrs := r.Attrs
+	created := attrs.LastModified
+	if created.IsZero() {
+		created = createdAt
+	}
 	return blobstore.Object{
 		Key:       key,
 		Body:      body,
 		Token:     generationToken(attrs.Generation),
-		CreatedAt: attrs.LastModified,
+		CreatedAt: created,
 	}, nil
 }
 
@@ -221,6 +274,11 @@ func isPreconditionError(err error) bool {
 func isPreconditionAPIError(err error) bool {
 	var apiErr *googleapi.Error
 	return errors.As(err, &apiErr) && apiErr.Code == 412
+}
+
+func isNotModifiedError(err error) bool {
+	var apiErr *googleapi.Error
+	return errors.As(err, &apiErr) && apiErr.Code == 304
 }
 
 func parseGeneration(token string) (int64, error) {

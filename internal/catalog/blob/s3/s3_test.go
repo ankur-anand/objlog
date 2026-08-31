@@ -27,6 +27,15 @@ func TestBackendConformanceWithFakeS3(t *testing.T) {
 	})
 }
 
+func BenchmarkConditionalHeadRead140KiB(b *testing.B) {
+	backendtest.BenchmarkConditionalGet140KiB(b, backendtest.Config{
+		NewBackend: func(tb testing.TB) blob.Backend {
+			backend, _ := newFakeBackend(tb, "catalog")
+			return backend
+		},
+	})
+}
+
 func TestBackendContentTypeWithFakeS3(t *testing.T) {
 	t.Parallel()
 

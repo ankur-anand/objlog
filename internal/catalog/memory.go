@@ -27,6 +27,20 @@ type memoryPartition struct {
 	segments    []pmeta.SegmentRef
 }
 
+type memoryPartitionSnapshot struct {
+	catalog   *MemoryCatalog
+	partition uint32
+	version   uint64
+	head      pmeta.PartitionHead
+}
+
+func (s *memoryPartitionSnapshot) PartitionHead() pmeta.PartitionHead {
+	if s == nil {
+		return pmeta.PartitionHead{}
+	}
+	return s.head
+}
+
 type memoryWriterSession struct {
 	cat       *MemoryCatalog
 	partition uint32
@@ -73,7 +87,7 @@ func (c *MemoryCatalog) InitializePartition(ctx context.Context, partition uint3
 		NextLSN:   nextLSN,
 		OldestLSN: nextLSN,
 	}
-	c.partitions[partition] = &memoryPartition{state: state}
+	c.partitions[partition] = &memoryPartition{state: state, headVersion: 1}
 	return state, true, nil
 }
 
@@ -125,6 +139,43 @@ func (c *MemoryCatalog) LoadPartition(ctx context.Context, partition uint32) (pm
 		return pmeta.PartitionHead{StreamID: c.streamID, Partition: partition}, nil
 	}
 	return data.state, nil
+}
+
+func (c *MemoryCatalog) LoadPartitionSnapshot(ctx context.Context, partition uint32) (PartitionSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	head := pmeta.PartitionHead{StreamID: c.streamID, Partition: partition}
+	var version uint64
+	if data, ok := c.partitions[partition]; ok {
+		head = data.state
+		version = data.headVersion
+	}
+	return &memoryPartitionSnapshot{catalog: c, partition: partition, version: version, head: head}, nil
+}
+
+func (c *MemoryCatalog) RefreshPartitionSnapshot(ctx context.Context, partition uint32, previous PartitionSnapshot) (PartitionSnapshot, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	prior, ok := previous.(*memoryPartitionSnapshot)
+	if !ok || prior == nil || prior.catalog != c || prior.partition != partition {
+		return nil, false, fmt.Errorf("%w: incompatible partition snapshot", ErrInvalidRequest)
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	head := pmeta.PartitionHead{StreamID: c.streamID, Partition: partition}
+	var version uint64
+	if data, ok := c.partitions[partition]; ok {
+		head = data.state
+		version = data.headVersion
+	}
+	if version == prior.version {
+		return prior, false, nil
+	}
+	return &memoryPartitionSnapshot{catalog: c, partition: partition, version: version, head: head}, true, nil
 }
 
 func (c *MemoryCatalog) RequestRetention(ctx context.Context, partition uint32, request RetentionRequest) (RetentionRequest, error) {

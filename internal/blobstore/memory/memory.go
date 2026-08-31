@@ -26,6 +26,7 @@ type object struct {
 }
 
 var _ blobstore.Store = (*Store)(nil)
+var _ blobstore.ConditionalGetter = (*Store)(nil)
 
 func New() *Store {
 	return &Store{objects: make(map[string]object)}
@@ -45,6 +46,25 @@ func (s *Store) Get(ctx context.Context, key string) (blobstore.Object, error) {
 		return blobstore.Object{}, blobstore.ErrObjectNotFound
 	}
 	return cloneObject(key, stored), nil
+}
+
+func (s *Store) GetIfChanged(ctx context.Context, key string, token string) (blobstore.Object, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return blobstore.Object{}, false, err
+	}
+	if key == "" {
+		return blobstore.Object{}, false, fmt.Errorf("%w: empty key", blobstore.ErrInvalidRequest)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stored, ok := s.objects[key]
+	if !ok {
+		return blobstore.Object{}, false, blobstore.ErrObjectNotFound
+	}
+	if token != "" && stored.token == token {
+		return blobstore.Object{Key: key, Token: token, CreatedAt: stored.createdAt}, false, nil
+	}
+	return cloneObject(key, stored), true, nil
 }
 
 func (s *Store) Put(ctx context.Context, key string, body []byte) (blobstore.Object, error) {

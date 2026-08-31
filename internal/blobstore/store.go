@@ -51,6 +51,27 @@ type Store interface {
 	Delete(ctx context.Context, key string) error
 }
 
+// ConditionalGetter is implemented by stores that can avoid returning an
+// object's body when its provider token has not changed. The token is opaque
+// and must have been returned by the same store for the same key.
+//
+// GetIfChanged returns changed=false with a zero-body object when token still
+// identifies the current object. A changed or missing object is reported using
+// the same object and error contracts as Get.
+type ConditionalGetter interface {
+	GetIfChanged(ctx context.Context, key string, token string) (object Object, changed bool, err error)
+}
+
+// GetIfChanged uses a provider's conditional read when available. Stores that
+// do not implement ConditionalGetter retain the ordinary Get behavior.
+func GetIfChanged(ctx context.Context, store Store, key string, token string) (Object, bool, error) {
+	if conditional, ok := store.(ConditionalGetter); ok && token != "" {
+		return conditional.GetIfChanged(ctx, key, token)
+	}
+	object, err := store.Get(ctx, key)
+	return object, err == nil, err
+}
+
 type Object struct {
 	Key       string
 	Body      []byte

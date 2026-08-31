@@ -21,6 +21,24 @@ type Reader interface {
 	ListSegments(ctx context.Context, req ListSegmentsRequest) (pmeta.SegmentPage, error)
 }
 
+// PartitionSnapshot is a validated partition head plus opaque catalog-specific
+// state. Implementations may retain provider tokens and decoded traversal roots
+// without exposing them through pmeta.PartitionHead.
+type PartitionSnapshot interface {
+	PartitionHead() pmeta.PartitionHead
+}
+
+// SnapshotReader allows refresh coordinators to poll a previously loaded head
+// conditionally. changed=false means previous is still authoritative and may be
+// reused without decoding another head body.
+//
+// Reader implementations are not required to implement SnapshotReader. A
+// caller must fall back to LoadPartition when this interface is unavailable.
+type SnapshotReader interface {
+	LoadPartitionSnapshot(ctx context.Context, partition uint32) (PartitionSnapshot, error)
+	RefreshPartitionSnapshot(ctx context.Context, partition uint32, previous PartitionSnapshot) (snapshot PartitionSnapshot, changed bool, err error)
+}
+
 // TimestampLookupRequest asks for the earliest retained segment whose maximum
 // timestamp is at least TimestampMS. Catalogs rely on their global
 // nondecreasing timestamp invariant to answer this without scanning by LSN.

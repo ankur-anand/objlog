@@ -32,6 +32,15 @@ func TestBackendConformanceWithFakeAzure(t *testing.T) {
 	})
 }
 
+func BenchmarkConditionalHeadRead140KiB(b *testing.B) {
+	backendtest.BenchmarkConditionalGet140KiB(b, backendtest.Config{
+		NewBackend: func(tb testing.TB) blob.Backend {
+			backend, _, _ := newFakeBackend(tb)
+			return backend
+		},
+	})
+}
+
 func TestBackendContentTypeWithFakeAzure(t *testing.T) {
 	t.Parallel()
 
@@ -142,7 +151,7 @@ func (f *fakeAzureBlobServer) serveHTTP(w http.ResponseWriter, r *http.Request) 
 	case http.MethodPut:
 		f.putBlob(w, r, key)
 	case http.MethodGet:
-		f.getBlob(w, key)
+		f.getBlob(w, r, key)
 	case http.MethodHead:
 		f.getProperties(w, key)
 	case http.MethodDelete:
@@ -194,10 +203,14 @@ func (f *fakeAzureBlobServer) putBlob(w http.ResponseWriter, r *http.Request, ke
 	w.WriteHeader(http.StatusCreated)
 }
 
-func (f *fakeAzureBlobServer) getBlob(w http.ResponseWriter, key string) {
+func (f *fakeAzureBlobServer) getBlob(w http.ResponseWriter, r *http.Request, key string) {
 	obj := f.object(key)
 	if obj.etag == "" {
 		writeAzureError(w, http.StatusNotFound, "BlobNotFound")
+		return
+	}
+	if r.Header.Get("If-None-Match") == obj.etag {
+		writeAzureError(w, http.StatusNotModified, "ConditionNotMet")
 		return
 	}
 	writeAzureBlobHeaders(w, obj)

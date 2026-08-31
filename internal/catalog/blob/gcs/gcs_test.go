@@ -29,6 +29,15 @@ func TestBackendConformanceWithFakeGCS(t *testing.T) {
 	})
 }
 
+func BenchmarkConditionalHeadRead140KiB(b *testing.B) {
+	backendtest.BenchmarkConditionalGet140KiB(b, backendtest.Config{
+		NewBackend: func(tb testing.TB) blob.Backend {
+			backend, _ := newFakeBackend(tb, "catalog")
+			return backend
+		},
+	})
+}
+
 func TestBackendContentTypeWithFakeGCS(t *testing.T) {
 	t.Parallel()
 
@@ -69,6 +78,9 @@ func TestBackendRejectsBadInputs(t *testing.T) {
 	}
 	if _, _, err := backend.CompareAndSwap(context.Background(), "x", "not-a-generation", []byte("x")); !errors.Is(err, blob.ErrCorruptCatalog) {
 		t.Fatalf("CompareAndSwap(bad token) error = %v, want %v", err, blob.ErrCorruptCatalog)
+	}
+	if _, _, err := backend.GetIfChanged(context.Background(), "x", "not-a-generation"); !errors.Is(err, blob.ErrCorruptCatalog) {
+		t.Fatalf("GetIfChanged(bad token) error = %v, want %v", err, blob.ErrCorruptCatalog)
 	}
 }
 

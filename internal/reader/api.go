@@ -506,7 +506,7 @@ type refreshCoordinator struct {
 }
 
 type partitionState struct {
-	head       pmeta.PartitionHead
+	snapshot   catalog.PartitionSnapshot
 	hasHead    bool
 	generation uint64
 	changed    chan struct{}
@@ -514,13 +514,21 @@ type partitionState struct {
 }
 
 type cachedPartitionHead struct {
-	head    pmeta.PartitionHead
-	element *list.Element
+	snapshot catalog.PartitionSnapshot
+	element  *list.Element
 }
 
 type headSnapshot struct {
-	head       pmeta.PartitionHead
+	snapshot   catalog.PartitionSnapshot
 	generation uint64
+}
+
+type staticPartitionSnapshot struct {
+	head pmeta.PartitionHead
+}
+
+func (s staticPartitionSnapshot) PartitionHead() pmeta.PartitionHead {
+	return s.head
 }
 
 func newRefreshCoordinator(cat catalog.Reader, policy RefreshPolicy, maxCachedPartitionHeads int, observer Observer) *refreshCoordinator {
@@ -613,19 +621,40 @@ func (c *refreshCoordinator) refresh(ctx context.Context, partition uint32) (pme
 		}()
 		workCtx, cancel := context.WithTimeout(loadCtx, c.policy.RefreshTimeout)
 		defer cancel()
-		head, err := c.catalog.LoadPartition(workCtx, partition)
-		if err != nil {
-			refreshErr = err
-			return headSnapshot{}, err
+		previous, previousGeneration, hasPrevious := c.partitionSnapshot(partition)
+		var snapshot catalog.PartitionSnapshot
+		var loadErr error
+		changed := true
+		if snapshotReader, ok := c.catalog.(catalog.SnapshotReader); ok {
+			if hasPrevious {
+				snapshot, changed, loadErr = snapshotReader.RefreshPartitionSnapshot(workCtx, partition, previous)
+			} else {
+				snapshot, loadErr = snapshotReader.LoadPartitionSnapshot(workCtx, partition)
+			}
+		} else {
+			head, loadErr = c.catalog.LoadPartition(workCtx, partition)
+			snapshot = staticPartitionSnapshot{head: head}
 		}
-		generation := c.updateHead(partition, head)
-		return headSnapshot{head: head, generation: generation}, nil
+		if loadErr != nil {
+			refreshErr = loadErr
+			return headSnapshot{}, loadErr
+		}
+		if snapshot == nil {
+			refreshErr = fmt.Errorf("%w: catalog returned nil partition snapshot", ErrCorruptData)
+			return headSnapshot{}, refreshErr
+		}
+		head = snapshot.PartitionHead()
+		if hasPrevious && !changed {
+			return headSnapshot{snapshot: previous, generation: previousGeneration}, nil
+		}
+		generation := c.updateHead(partition, snapshot)
+		return headSnapshot{snapshot: snapshot, generation: generation}, nil
 	})
 	if err != nil {
 		return pmeta.PartitionHead{}, err
 	}
 	snapshot := result.(headSnapshot)
-	return snapshot.head, nil
+	return snapshot.snapshot.PartitionHead(), nil
 }
 
 func (c *refreshCoordinator) observe(event MetricEvent) {
@@ -650,7 +679,7 @@ func (c *refreshCoordinator) watchPartition(partition uint32) {
 			refs:    1,
 		}
 		if cached, cachedOK := c.cachedHeads[partition]; cachedOK {
-			state.head = cached.head
+			state.snapshot = cached.snapshot
 			state.hasHead = true
 			state.generation = c.nextGenerationLocked()
 			c.removeCachedHeadLocked(partition)
@@ -677,7 +706,7 @@ func (c *refreshCoordinator) unwatchPartition(partition uint32) {
 			delete(c.watches, partition)
 			close(state.changed)
 			if state.hasHead {
-				c.cacheHeadLocked(partition, state.head)
+				c.cacheHeadLocked(partition, state.snapshot)
 			}
 		}
 	}
@@ -752,20 +781,28 @@ func (c *refreshCoordinator) snapshotWatched() []uint32 {
 }
 
 func (c *refreshCoordinator) snapshot(partition uint32) (pmeta.PartitionHead, uint64, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
-		return pmeta.PartitionHead{}, 0, false
-	}
-	if state, ok := c.watches[partition]; ok && state.hasHead {
-		return state.head, state.generation, true
-	}
-	cached, ok := c.cachedHeads[partition]
+	snapshot, generation, ok := c.partitionSnapshot(partition)
 	if !ok {
 		return pmeta.PartitionHead{}, 0, false
 	}
+	return snapshot.PartitionHead(), generation, true
+}
+
+func (c *refreshCoordinator) partitionSnapshot(partition uint32) (catalog.PartitionSnapshot, uint64, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil, 0, false
+	}
+	if state, ok := c.watches[partition]; ok && state.hasHead {
+		return state.snapshot, state.generation, true
+	}
+	cached, ok := c.cachedHeads[partition]
+	if !ok {
+		return nil, 0, false
+	}
 	c.cachedHeadLRU.MoveToFront(cached.element)
-	return cached.head, 0, true
+	return cached.snapshot, 0, true
 }
 
 func (c *refreshCoordinator) waitChannel(partition uint32, generation uint64) (<-chan struct{}, bool) {
@@ -781,35 +818,37 @@ func (c *refreshCoordinator) waitChannel(partition uint32, generation uint64) (<
 	return state.changed, true
 }
 
-func (c *refreshCoordinator) updateHead(partition uint32, head pmeta.PartitionHead) uint64 {
+func (c *refreshCoordinator) updateHead(partition uint32, snapshot catalog.PartitionSnapshot) uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
 		return 0
 	}
+	head := snapshot.PartitionHead()
 	if state, ok := c.watches[partition]; ok {
-		if state.hasHead && state.head == head {
+		if state.hasHead && state.snapshot.PartitionHead() == head {
+			state.snapshot = snapshot
 			return state.generation
 		}
-		state.head = head
+		state.snapshot = snapshot
 		state.hasHead = true
 		state.generation = c.nextGenerationLocked()
 		close(state.changed)
 		state.changed = make(chan struct{})
 		return state.generation
 	}
-	c.cacheHeadLocked(partition, head)
+	c.cacheHeadLocked(partition, snapshot)
 	return 0
 }
 
-func (c *refreshCoordinator) cacheHeadLocked(partition uint32, head pmeta.PartitionHead) {
+func (c *refreshCoordinator) cacheHeadLocked(partition uint32, snapshot catalog.PartitionSnapshot) {
 	if cached, ok := c.cachedHeads[partition]; ok {
-		cached.head = head
+		cached.snapshot = snapshot
 		c.cachedHeadLRU.MoveToFront(cached.element)
 		return
 	}
 	element := c.cachedHeadLRU.PushFront(partition)
-	c.cachedHeads[partition] = &cachedPartitionHead{head: head, element: element}
+	c.cachedHeads[partition] = &cachedPartitionHead{snapshot: snapshot, element: element}
 	for len(c.cachedHeads) > c.maxCachedPartitionHeads {
 		oldest := c.cachedHeadLRU.Back()
 		if oldest == nil {
