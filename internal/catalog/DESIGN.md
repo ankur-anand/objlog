@@ -249,6 +249,21 @@ ListSegments(ctx, partition, fromLSN, limit) -> pmeta.SegmentPage
 
 No read method returns full history.
 
+Reader runtimes may retain an opaque `PartitionSnapshot` alongside the public
+head. A snapshot can contain a validated decoded head, its immutable traversal
+roots, and the provider mutation token without adding provider-specific fields
+to `pmeta.PartitionHead`. Catalogs that implement `SnapshotReader` support:
+
+```go
+LoadPartitionSnapshot(ctx, partition) -> snapshot
+RefreshPartitionSnapshot(ctx, partition, previous) -> (snapshot, changed)
+```
+
+`changed=false` is a successful refresh: the previous validated snapshot is
+still authoritative and its head body must not be decoded again. Blob-backed
+catalogs use conditional object reads for this path. An unchanged refresh must
+not advance a watch generation or wake a tailer.
+
 ### Write Role
 
 Writers open a fenced writer session before appending:

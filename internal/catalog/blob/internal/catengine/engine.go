@@ -43,6 +43,15 @@ type Engine struct {
 	opts    EngineOptions
 }
 
+// HeadSnapshot retains one validated decoded head and its provider mutation
+// token. The decoded head is immutable and can safely be reused for catalog
+// traversal while Token is used for conditional refresh.
+type HeadSnapshot struct {
+	Decoded catformat.Head
+	State   pmeta.PartitionHead
+	Token   string
+}
+
 func NewEngine(backend blobstore.Store, opts EngineOptions) (*Engine, error) {
 	if backend == nil {
 		return nil, fmt.Errorf("%w: nil backend", csession.ErrInvalidRequest)
@@ -155,6 +164,70 @@ func (e *Engine) LoadPartition(ctx context.Context, partition uint32) (pmeta.Par
 		return pmeta.PartitionHead{}, err
 	}
 	return config.PartitionHead(head)
+}
+
+func (e *Engine) LoadHeadSnapshot(ctx context.Context, partition uint32) (HeadSnapshot, error) {
+	head, token, err := e.Load(ctx, partition)
+	if err != nil {
+		return HeadSnapshot{}, err
+	}
+	config, err := e.config(partition)
+	if err != nil {
+		return HeadSnapshot{}, err
+	}
+	state, err := config.PartitionHead(head)
+	if err != nil {
+		return HeadSnapshot{}, err
+	}
+	return HeadSnapshot{Decoded: head, State: state, Token: token}, nil
+}
+
+func (e *Engine) RefreshHeadSnapshot(ctx context.Context, partition uint32, previous HeadSnapshot) (HeadSnapshot, bool, error) {
+	if previous.State.Partition != partition {
+		return HeadSnapshot{}, false, fmt.Errorf("%w: snapshot partition=%d request partition=%d", csession.ErrInvalidRequest, previous.State.Partition, partition)
+	}
+	config, err := e.config(partition)
+	if err != nil {
+		return HeadSnapshot{}, false, err
+	}
+	if previous.Token == "" {
+		next, err := e.LoadHeadSnapshot(ctx, partition)
+		if err != nil {
+			return HeadSnapshot{}, false, err
+		}
+		// Every catalog-head mutation currently changes at least one public
+		// PartitionHead field. Therefore equal public state plus equal empty
+		// tokens means the synthetic uninitialized snapshot is unchanged.
+		if next.Token == previous.Token && next.State == previous.State {
+			return previous, false, nil
+		}
+		return next, true, nil
+	}
+
+	object, changed, err := blobstore.GetIfChanged(ctx, e.backend, config.HeadPath(), previous.Token)
+	if errors.Is(err, blobstore.ErrObjectNotFound) {
+		head, _, newErr := NewHead(config, 0)
+		if newErr != nil {
+			return HeadSnapshot{}, false, newErr
+		}
+		state, stateErr := config.PartitionHead(head)
+		return HeadSnapshot{Decoded: head, State: state}, true, stateErr
+	}
+	if err != nil {
+		return HeadSnapshot{}, false, err
+	}
+	if !changed {
+		return previous, false, nil
+	}
+	head, err := config.DecodeHead(object.Body)
+	if err != nil {
+		return HeadSnapshot{}, false, err
+	}
+	state, err := config.PartitionHead(head)
+	if err != nil {
+		return HeadSnapshot{}, false, err
+	}
+	return HeadSnapshot{Decoded: head, State: state, Token: object.Token}, true, nil
 }
 
 func (e *Engine) OpenWriter(ctx context.Context, partition uint32, writerID [16]byte) (*Session, error) {

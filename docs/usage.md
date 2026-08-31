@@ -245,7 +245,10 @@ Concurrent refreshes for the same partition share one catalog load. Each
 caller can cancel its own wait independently; the shared load is canceled when
 its final waiter leaves. `Reader.Close` rejects new refreshes, cancels active
 loads with `reader.ErrClosed`, and waits for their workers before clearing
-reader-owned caches.
+reader-owned caches. Blob-backed readers retain the head's provider token and
+use conditional refreshes, so an unchanged tail poll transfers no catalog-head
+body. GCS uses a conditional metadata probe followed by a generation-matched
+body read only when the generation changes.
 
 ## Replay With A Cursor
 

@@ -13,6 +13,7 @@ import (
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	awstypes "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 type Backend struct {
@@ -23,6 +24,7 @@ type Backend struct {
 const maxListKeys = 1000
 
 var _ blobstore.Store = (*Backend)(nil)
+var _ blobstore.ConditionalGetter = (*Backend)(nil)
 
 func New(client *awss3.Client, bucket string) (*Backend, error) {
 	if client == nil {
@@ -35,28 +37,45 @@ func New(client *awss3.Client, bucket string) (*Backend, error) {
 }
 
 func (b *Backend) Get(ctx context.Context, key string) (blobstore.Object, error) {
+	object, _, err := b.get(ctx, key, nil)
+	return object, err
+}
+
+func (b *Backend) GetIfChanged(ctx context.Context, key string, token string) (blobstore.Object, bool, error) {
+	if token == "" {
+		object, err := b.Get(ctx, key)
+		return object, err == nil, err
+	}
+	return b.get(ctx, key, aws.String(token))
+}
+
+func (b *Backend) get(ctx context.Context, key string, ifNoneMatch *string) (blobstore.Object, bool, error) {
 	if key == "" {
-		return blobstore.Object{}, fmt.Errorf("%w: empty key", blobstore.ErrInvalidRequest)
+		return blobstore.Object{}, false, fmt.Errorf("%w: empty key", blobstore.ErrInvalidRequest)
 	}
 	out, err := b.client.GetObject(ctx, &awss3.GetObjectInput{
-		Bucket: aws.String(b.bucket),
-		Key:    aws.String(key),
+		Bucket:      aws.String(b.bucket),
+		Key:         aws.String(key),
+		IfNoneMatch: ifNoneMatch,
 	})
+	if isNotModifiedError(err) {
+		return blobstore.Object{Key: key, Token: aws.ToString(ifNoneMatch)}, false, nil
+	}
 	if err != nil {
-		return blobstore.Object{}, mapError(err)
+		return blobstore.Object{}, false, mapError(err)
 	}
 	defer out.Body.Close()
 
 	body, err := io.ReadAll(out.Body)
 	if err != nil {
-		return blobstore.Object{}, err
+		return blobstore.Object{}, false, err
 	}
 	return blobstore.Object{
 		Key:       key,
 		Body:      body,
 		Token:     aws.ToString(out.ETag),
 		CreatedAt: aws.ToTime(out.LastModified),
-	}, nil
+	}, true, nil
 }
 
 func (b *Backend) Put(ctx context.Context, key string, body []byte) (blobstore.Object, error) {
@@ -302,6 +321,15 @@ func isNotFoundError(err error) bool {
 	default:
 		return false
 	}
+}
+
+func isNotModifiedError(err error) bool {
+	var responseErr *smithyhttp.ResponseError
+	if errors.As(err, &responseErr) && responseErr.HTTPStatusCode() == 304 {
+		return true
+	}
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "NotModified"
 }
 
 func stringPtr(s string) *string {

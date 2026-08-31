@@ -11,6 +11,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	azblobblob "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/ankur-anand/objlog/internal/blobstore"
@@ -24,6 +25,7 @@ type Backend struct {
 }
 
 var _ blobstore.Store = (*Backend)(nil)
+var _ blobstore.ConditionalGetter = (*Backend)(nil)
 
 func New(container *container.Client) (*Backend, error) {
 	if container == nil {
@@ -33,25 +35,56 @@ func New(container *container.Client) (*Backend, error) {
 }
 
 func (b *Backend) Get(ctx context.Context, key string) (blobstore.Object, error) {
-	if key == "" {
-		return blobstore.Object{}, fmt.Errorf("%w: empty key", blobstore.ErrInvalidRequest)
+	object, _, err := b.get(ctx, key, nil)
+	return object, err
+}
+
+func (b *Backend) GetIfChanged(ctx context.Context, key string, token string) (blobstore.Object, bool, error) {
+	if token == "" {
+		object, err := b.Get(ctx, key)
+		return object, err == nil, err
 	}
-	out, err := b.container.NewBlobClient(key).DownloadStream(ctx, nil)
+	etag := azcore.ETag(token)
+	return b.get(ctx, key, &etag)
+}
+
+func (b *Backend) get(ctx context.Context, key string, ifNoneMatch *azcore.ETag) (blobstore.Object, bool, error) {
+	if key == "" {
+		return blobstore.Object{}, false, fmt.Errorf("%w: empty key", blobstore.ErrInvalidRequest)
+	}
+	var options *azblobblob.DownloadStreamOptions
+	if ifNoneMatch != nil {
+		options = &azblobblob.DownloadStreamOptions{
+			AccessConditions: &azblobblob.AccessConditions{
+				ModifiedAccessConditions: &azblobblob.ModifiedAccessConditions{IfNoneMatch: ifNoneMatch},
+			},
+		}
+	}
+	out, err := b.container.NewBlobClient(key).DownloadStream(ctx, options)
+	if isNotModifiedError(err) {
+		return blobstore.Object{Key: key, Token: etagString(ifNoneMatch)}, false, nil
+	}
 	if err != nil {
-		return blobstore.Object{}, mapError(err)
+		return blobstore.Object{}, false, mapError(err)
+	}
+	if out.ErrorCode != nil && *out.ErrorCode == string(bloberror.ConditionNotMet) {
+		if out.Body != nil {
+			_ = out.Body.Close()
+		}
+		return blobstore.Object{Key: key, Token: etagString(ifNoneMatch)}, false, nil
 	}
 	defer out.Body.Close()
 
 	body, err := io.ReadAll(out.Body)
 	if err != nil {
-		return blobstore.Object{}, err
+		return blobstore.Object{}, false, err
 	}
 	return blobstore.Object{
 		Key:       key,
 		Body:      body,
 		Token:     etagString(out.ETag),
 		CreatedAt: timeValue(out.LastModified),
-	}, nil
+	}, true, nil
 }
 
 func (b *Backend) Put(ctx context.Context, key string, body []byte) (blobstore.Object, error) {
@@ -249,6 +282,11 @@ func isNotFoundError(err error) bool {
 		return false
 	}
 	return responseErr.StatusCode == 404
+}
+
+func isNotModifiedError(err error) bool {
+	var responseErr *azcore.ResponseError
+	return errors.As(err, &responseErr) && responseErr.StatusCode == 304
 }
 
 func etagString(etag *azcore.ETag) string {

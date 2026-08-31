@@ -82,6 +82,56 @@ func TestRefreshCoordinatorPinsWatchedHeadOutsidePassiveLimit(t *testing.T) {
 	}
 }
 
+func TestRefreshCoordinatorReusesUnchangedConditionalSnapshot(t *testing.T) {
+	cat := newConditionalSnapshotCatalog(7, 10)
+	coordinator := newRefreshCoordinator(cat, RefreshPolicy{PollInterval: time.Hour}, 1, nil)
+	coordinator.watchPartition(7)
+	defer coordinator.unwatchPartition(7)
+
+	first := loadHead(t, coordinator, 7)
+	_, generation, ok := coordinator.snapshot(7)
+	if !ok {
+		t.Fatal("initial conditional snapshot not cached")
+	}
+	changed, wait := coordinator.waitChannel(7, generation)
+	if !wait {
+		t.Fatal("initial watch channel missing")
+	}
+
+	unchanged, err := coordinator.refresh(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("unchanged refresh error = %v", err)
+	}
+	if unchanged != first {
+		t.Fatalf("unchanged refresh head = %+v, want %+v", unchanged, first)
+	}
+	if loads, refreshes := cat.calls(); loads != 1 || refreshes != 1 {
+		t.Fatalf("conditional calls loads=%d refreshes=%d, want 1/1", loads, refreshes)
+	}
+	select {
+	case <-changed:
+		t.Fatal("unchanged conditional refresh woke watch")
+	default:
+	}
+	if _, nextGeneration, _ := coordinator.snapshot(7); nextGeneration != generation {
+		t.Fatalf("unchanged refresh generation=%d, want %d", nextGeneration, generation)
+	}
+
+	cat.setNextLSN(11)
+	updated, err := coordinator.refresh(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("changed refresh error = %v", err)
+	}
+	if updated.NextLSN != 11 {
+		t.Fatalf("changed refresh next_lsn=%d, want 11", updated.NextLSN)
+	}
+	select {
+	case <-changed:
+	default:
+		t.Fatal("changed conditional refresh did not wake watch")
+	}
+}
+
 func TestRefreshCoordinatorFinalUnwatchWakesWaiterAndReleasesHead(t *testing.T) {
 	cat := newHeadCacheCatalog()
 	coordinator := newRefreshCoordinator(cat, RefreshPolicy{}, 1, nil)
@@ -248,4 +298,94 @@ func (c *headCacheCatalog) setNextLSN(partition uint32, nextLSN uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.nextLSN[partition] = nextLSN
+}
+
+type conditionalSnapshotCatalog struct {
+	mu        sync.Mutex
+	partition uint32
+	head      pmeta.PartitionHead
+	version   uint64
+	loads     int
+	refreshes int
+}
+
+type conditionalTestSnapshot struct {
+	owner   *conditionalSnapshotCatalog
+	version uint64
+	head    pmeta.PartitionHead
+}
+
+func (s *conditionalTestSnapshot) PartitionHead() pmeta.PartitionHead { return s.head }
+
+func newConditionalSnapshotCatalog(partition uint32, nextLSN uint64) *conditionalSnapshotCatalog {
+	return &conditionalSnapshotCatalog{
+		partition: partition,
+		head: pmeta.PartitionHead{
+			StreamID:    "stream-a",
+			Partition:   partition,
+			NextLSN:     nextLSN,
+			WriterEpoch: 1,
+		},
+		version: 1,
+	}
+}
+
+func (c *conditionalSnapshotCatalog) LoadPartition(context.Context, uint32) (pmeta.PartitionHead, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.head, nil
+}
+
+func (c *conditionalSnapshotCatalog) LoadPartitionSnapshot(ctx context.Context, partition uint32) (catalog.PartitionSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.loads++
+	return &conditionalTestSnapshot{owner: c, version: c.version, head: c.head}, nil
+}
+
+func (c *conditionalSnapshotCatalog) RefreshPartitionSnapshot(ctx context.Context, partition uint32, previous catalog.PartitionSnapshot) (catalog.PartitionSnapshot, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	prior, ok := previous.(*conditionalTestSnapshot)
+	if !ok || prior.owner != c || partition != c.partition {
+		return nil, false, errors.New("incompatible snapshot")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.refreshes++
+	if prior.version == c.version {
+		return prior, false, nil
+	}
+	return &conditionalTestSnapshot{owner: c, version: c.version, head: c.head}, true, nil
+}
+
+func (*conditionalSnapshotCatalog) FindSegment(context.Context, uint32, uint64) (pmeta.SegmentRef, bool, error) {
+	return pmeta.SegmentRef{}, false, nil
+}
+
+func (c *conditionalSnapshotCatalog) LookupTimestamp(context.Context, catalog.TimestampLookupRequest) (catalog.TimestampLookupResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return catalog.TimestampLookupResult{Head: c.head}, nil
+}
+
+func (*conditionalSnapshotCatalog) ListSegments(context.Context, catalog.ListSegmentsRequest) (pmeta.SegmentPage, error) {
+	return pmeta.SegmentPage{}, nil
+}
+
+func (c *conditionalSnapshotCatalog) setNextLSN(nextLSN uint64) {
+	c.mu.Lock()
+	c.head.NextLSN = nextLSN
+	c.version++
+	c.mu.Unlock()
+}
+
+func (c *conditionalSnapshotCatalog) calls() (int, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.loads, c.refreshes
 }

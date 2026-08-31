@@ -8,7 +8,10 @@ import (
 )
 
 var (
-	_ blobstore.Store = (*blobs3.Backend)(nil)
-	_ blobstore.Store = (*blobgcs.Backend)(nil)
-	_ blobstore.Store = (*blobazure.Backend)(nil)
+	_ blobstore.Store             = (*blobs3.Backend)(nil)
+	_ blobstore.Store             = (*blobgcs.Backend)(nil)
+	_ blobstore.Store             = (*blobazure.Backend)(nil)
+	_ blobstore.ConditionalGetter = (*blobs3.Backend)(nil)
+	_ blobstore.ConditionalGetter = (*blobgcs.Backend)(nil)
+	_ blobstore.ConditionalGetter = (*blobazure.Backend)(nil)
 )
