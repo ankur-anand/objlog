@@ -99,6 +99,14 @@ type RetentionSession interface {
 	ApplyPendingRetention(ctx context.Context) (RetentionResult, error)
 }
 
+// RetentionReconciler resolves an earlier indeterminate retention operation
+// before publication, without polling for new retention requests. Sessions
+// returning ErrRetentionIndeterminate must implement this interface. The bool
+// reports an outstanding result; false must leave the session snapshot unchanged.
+type RetentionReconciler interface {
+	ReconcilePendingRetention(ctx context.Context) (RetentionResult, bool, error)
+}
+
 type RetentionResult struct {
 	Snapshot      Snapshot
 	PolicyVersion uint64

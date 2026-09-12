@@ -15,9 +15,11 @@ import (
 )
 
 const (
-	cleanupTimeout            = 5 * time.Second
-	ageCutRetryInitialBackoff = 10 * time.Millisecond
-	ageCutRetryMaxBackoff     = time.Second
+	cleanupTimeout               = 5 * time.Second
+	ageCutRetryInitialBackoff    = 10 * time.Millisecond
+	ageCutRetryMaxBackoff        = time.Second
+	retentionRetryInitialBackoff = 10 * time.Millisecond
+	retentionRetryMaxBackoff     = time.Second
 )
 
 // Writer owns one partition's append flow. Calls that mutate the writer must
@@ -426,9 +428,9 @@ func (w *Writer) Err() error {
 	return w.firstErr
 }
 
-// ApplyPendingRetention applies the latest retention request through this
-// writer's fenced catalog session. It does not poll automatically; the
-// partition owner chooses when to call it.
+// ApplyPendingRetention applies retention through this writer's fenced catalog
+// session, first acknowledging any earlier indeterminate operation. Publication
+// also reconciles such operations, but only explicit calls poll for new requests.
 func (w *Writer) ApplyPendingRetention(ctx context.Context) (RetentionResult, error) {
 	session, ok := w.opts.Session.(RetentionSession)
 	if !ok {
@@ -454,12 +456,21 @@ func (w *Writer) ApplyPendingRetention(ctx context.Context) (RetentionResult, er
 		}
 		return RetentionResult{}, err
 	}
-	if err := validateRetentionSnapshot(current, result); err != nil {
+	if err := w.acceptRetentionLocked(current, result); err != nil {
 		w.sessionMu.Unlock()
 		w.noteForegroundErr(err)
 		return RetentionResult{}, err
 	}
+	w.sessionMu.Unlock()
+	return result, nil
+}
 
+// acceptRetentionLocked runs while sessionMu excludes publication. Both
+// explicit retention and background reconciliation use the same validation.
+func (w *Writer) acceptRetentionLocked(current Snapshot, result RetentionResult) error {
+	if err := validateRetentionSnapshot(current, result); err != nil {
+		return err
+	}
 	w.mu.Lock()
 	w.committed = result.Snapshot
 	w.signalStateLocked()
@@ -467,8 +478,25 @@ func (w *Writer) ApplyPendingRetention(ctx context.Context) (RetentionResult, er
 		w.signalCommittedLocked()
 	}
 	w.mu.Unlock()
-	w.sessionMu.Unlock()
-	return result, nil
+	return nil
+}
+
+func (w *Writer) reconcileRetentionLocked(ctx context.Context) error {
+	session, ok := w.opts.Session.(RetentionReconciler)
+	if !ok {
+		return nil
+	}
+	w.mu.Lock()
+	current := w.committed
+	w.mu.Unlock()
+	result, pending, err := session.ReconcilePendingRetention(ctx)
+	if err != nil {
+		return normalizeRetentionErr(err)
+	}
+	if !pending {
+		return nil
+	}
+	return w.acceptRetentionLocked(current, result)
 }
 
 func (w *Writer) finalizeLoop() {
@@ -570,6 +598,7 @@ func (w *Writer) finalizeLoop() {
 
 func (w *Writer) publishLoop() {
 	defer w.workersWG.Done()
+	retentionBackoff := retentionRetryInitialBackoff
 
 	for {
 		w.mu.Lock()
@@ -594,11 +623,36 @@ func (w *Writer) publishLoop() {
 		w.mu.Unlock()
 
 		w.sessionMu.Lock()
+		operationCtx, cancel := context.WithTimeout(w.workerCtx, w.opts.Timeouts.CatalogPublish)
+		if err := w.reconcileRetentionLocked(operationCtx); err != nil {
+			cancel()
+			w.sessionMu.Unlock()
+			if w.workerCtx.Err() != nil {
+				return
+			}
+			if !errors.Is(err, ErrRetentionIndeterminate) {
+				w.noteAsyncErr(err)
+				return
+			}
+			// Keep ready segments queued while the earlier retention is unknown.
+			// Release sessionMu so a foreground retention retry can also recover.
+			timer := time.NewTimer(retentionBackoff)
+			select {
+			case <-w.workerCtx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			retentionBackoff = min(retentionBackoff*2, retentionRetryMaxBackoff)
+			continue
+		}
+		cancel()
+		retentionBackoff = retentionRetryInitialBackoff
 		w.mu.Lock()
 		current := w.committed
 		w.mu.Unlock()
 		start := time.Now()
-		operationCtx, cancel := context.WithTimeout(w.workerCtx, w.opts.Timeouts.CatalogPublish)
+		operationCtx, cancel = context.WithTimeout(w.workerCtx, w.opts.Timeouts.CatalogPublish)
 		next, err := w.opts.Session.PublishSegment(operationCtx, PublishRequest{
 			ExpectedNextLSN: item.expectedNextLSN,
 			Segment:         item.segment,

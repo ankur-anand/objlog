@@ -416,6 +416,17 @@ type Session struct {
 	lastAppend      pmeta.SegmentRef
 	lastAppendState pmeta.PartitionHead
 	hasLastAppend   bool
+
+	// A head refresh must not consume an unacknowledged retention result.
+	// Append may resolve it, but only a retention call acknowledges it.
+	pendingRetention *retentionCommit
+}
+
+type retentionCommit struct {
+	request  csession.RetentionRequest
+	previous catformat.Head
+	mutation Mutation
+	resolved bool
 }
 
 func newSession(engine *Engine, config Config, head catformat.Head, token string) *Session {
@@ -456,6 +467,9 @@ func (s *Session) AppendSegment(ctx context.Context, segment pmeta.SegmentRef) (
 			return s.lastAppendState, nil
 		}
 		return pmeta.PartitionHead{}, fmt.Errorf("%w: partition=%d", csession.ErrStaleWriter, s.config.Partition)
+	}
+	if err := s.resolveRetentionLocked(ctx); err != nil {
+		return pmeta.PartitionHead{}, err
 	}
 	if s.head.HasLastSegment() && s.config.segmentRef(s.head.LastSegment) == segment {
 		// A retry acknowledges this session's previously returned commit state. A
@@ -506,20 +520,92 @@ func (s *Session) AppendSegment(ctx context.Context, segment pmeta.SegmentRef) (
 	return state, err
 }
 
-func (s *Session) ApplyPendingRetention(ctx context.Context, request csession.RetentionRequest, found bool) (pmeta.PartitionHead, bool, error) {
+func (s *Session) ApplyPendingRetention(ctx context.Context, request csession.RetentionRequest, found bool) (csession.RetentionApplyResult, error) {
 	if err := ctx.Err(); err != nil {
-		return pmeta.PartitionHead{}, false, err
+		return csession.RetentionApplyResult{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.pendingRetention != nil {
+		return s.acknowledgeRetentionLocked(ctx)
+	}
 	if err := s.refreshActiveLocked(ctx); err != nil {
-		return pmeta.PartitionHead{}, false, err
+		return csession.RetentionApplyResult{}, err
 	}
 	if !found || request.PolicyVersion <= s.head.Header.AppliedRetentionVersion {
 		state, err := s.config.PartitionHead(s.head)
-		return state, false, err
+		return csession.RetentionApplyResult{Head: state, Request: request}, err
 	}
-	return s.applyRetentionLocked(ctx, request.BeforeLSN, request.PolicyVersion)
+	state, applied, err := s.applyRetentionLocked(ctx, request)
+	return csession.RetentionApplyResult{Head: state, Request: request, Applied: applied}, err
+}
+
+func (s *Session) ReconcilePendingRetention(ctx context.Context) (csession.RetentionApplyResult, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pendingRetention == nil {
+		return csession.RetentionApplyResult{}, false, nil
+	}
+	result, err := s.acknowledgeRetentionLocked(ctx)
+	return result, true, err
+}
+
+func (s *Session) acknowledgeRetentionLocked(ctx context.Context) (csession.RetentionApplyResult, error) {
+	if err := s.resolveRetentionLocked(ctx); err != nil {
+		return csession.RetentionApplyResult{}, err
+	}
+	state, err := s.config.PartitionHead(s.head)
+	if err != nil {
+		return csession.RetentionApplyResult{}, err
+	}
+	result := csession.RetentionApplyResult{Head: state, Request: s.pendingRetention.request, Applied: true}
+	s.pendingRetention = nil
+	return result, nil
+}
+
+// Resolve before building another mutation, retaining the result until a
+// retention caller acknowledges it. Replaying the original mutation also
+// arbitrates with a delayed original CAS without overwriting a newer head.
+func (s *Session) resolveRetentionLocked(ctx context.Context) error {
+	pending := s.pendingRetention
+	if pending == nil {
+		return nil
+	}
+	if s.stale {
+		return fmt.Errorf("%w: partition=%d", csession.ErrStaleWriter, s.config.Partition)
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %w", csession.ErrCommitIndeterminate, err)
+	}
+	if pending.resolved {
+		return nil
+	}
+	if err := s.refreshActiveLocked(ctx); err != nil {
+		if errors.Is(err, csession.ErrStaleWriter) {
+			return err
+		}
+		return fmt.Errorf("%w: %w", csession.ErrCommitIndeterminate, err)
+	}
+	if retentionApplied(s.head, pending.mutation) {
+		pending.resolved = true
+		return nil
+	}
+	if !sameHead(pending.previous, s.head) {
+		return fmt.Errorf("%w: head changed during retention reconciliation partition=%d", csession.ErrConflict, s.config.Partition)
+	}
+	if _, err := s.commitRetentionLocked(ctx, pending.previous, pending.mutation); err != nil {
+		if errors.Is(err, csession.ErrStaleWriter) || errors.Is(err, csession.ErrConflict) {
+			return err
+		}
+		return fmt.Errorf("%w: %w", csession.ErrCommitIndeterminate, err)
+	}
+	// A historical commit receipt cannot authorize another mutation after a
+	// successor has acquired the fence.
+	if s.stale {
+		return fmt.Errorf("%w: partition=%d", csession.ErrStaleWriter, s.config.Partition)
+	}
+	pending.resolved = true
+	return nil
 }
 
 func (s *Session) ApplyRetention(ctx context.Context, beforeLSN, policyVersion uint64) (pmeta.PartitionHead, bool, error) {
@@ -528,10 +614,19 @@ func (s *Session) ApplyRetention(ctx context.Context, beforeLSN, policyVersion u
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if pending := s.pendingRetention; pending != nil && pending.request.BeforeLSN == beforeLSN && pending.request.PolicyVersion == policyVersion {
+		result, err := s.acknowledgeRetentionLocked(ctx)
+		return result.Head, result.Applied, err
+	}
+	if err := s.resolveRetentionLocked(ctx); err != nil {
+		return pmeta.PartitionHead{}, false, err
+	}
 	if err := s.refreshActiveLocked(ctx); err != nil {
 		return pmeta.PartitionHead{}, false, err
 	}
-	return s.applyRetentionLocked(ctx, beforeLSN, policyVersion)
+	return s.applyRetentionLocked(ctx, csession.RetentionRequest{
+		Version: csession.RetentionRequestVersion, BeforeLSN: beforeLSN, PolicyVersion: policyVersion,
+	})
 }
 
 func (s *Session) refreshActiveLocked(ctx context.Context) error {
@@ -547,20 +642,31 @@ func (s *Session) refreshActiveLocked(ctx context.Context) error {
 	return nil
 }
 
-func (s *Session) applyRetentionLocked(ctx context.Context, beforeLSN, policyVersion uint64) (pmeta.PartitionHead, bool, error) {
+func (s *Session) applyRetentionLocked(ctx context.Context, request csession.RetentionRequest) (pmeta.PartitionHead, bool, error) {
 	previous := s.head
-	mutation, err := ApplyRetention(ctx, s.config, backendPageSource{backend: s.engine.backend}, previous, beforeLSN, policyVersion)
+	mutation, err := ApplyRetention(ctx, s.config, backendPageSource{backend: s.engine.backend}, previous, request.BeforeLSN, request.PolicyVersion)
 	if err != nil {
 		return pmeta.PartitionHead{}, false, err
 	}
 	if mutation.Head.Header.Generation == previous.Header.Generation {
 		state, err := s.config.PartitionHead(previous)
-		return state, false, err
+		reconciled := s.pendingRetention != nil
+		if err == nil {
+			s.pendingRetention = nil
+		}
+		return state, reconciled, err
 	}
 	if err := s.putPages(ctx, mutation.Pages); err != nil {
 		return pmeta.PartitionHead{}, false, err
 	}
+	priorRetention := s.pendingRetention
+	s.pendingRetention = &retentionCommit{request: request, previous: previous, mutation: mutation}
 	state, err := s.commitRetentionLocked(ctx, previous, mutation)
+	if err == nil {
+		s.pendingRetention = nil
+	} else if !errors.Is(err, csession.ErrCommitIndeterminate) {
+		s.pendingRetention = priorRetention
+	}
 	return state, err == nil, err
 }
 
@@ -596,9 +702,13 @@ func (s *Session) commitAppendLocked(ctx context.Context, previous catformat.Hea
 
 func (s *Session) commitRetentionLocked(ctx context.Context, previous catformat.Head, mutation Mutation) (pmeta.PartitionHead, error) {
 	return s.commitLocked(ctx, previous, mutation, func(observed catformat.Head) (bool, error) {
-		return observed.Header.AppliedRetentionVersion >= mutation.Head.Header.AppliedRetentionVersion &&
-			observed.Header.OldestLSN >= mutation.Head.Header.OldestLSN, nil
+		return retentionApplied(observed, mutation), nil
 	})
+}
+
+func retentionApplied(observed catformat.Head, mutation Mutation) bool {
+	return observed.Header.AppliedRetentionVersion >= mutation.Head.Header.AppliedRetentionVersion &&
+		observed.Header.OldestLSN >= mutation.Head.Header.OldestLSN
 }
 
 func (s *Session) commitLocked(ctx context.Context, previous catformat.Head, mutation Mutation, applied func(catformat.Head) (bool, error)) (pmeta.PartitionHead, error) {

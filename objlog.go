@@ -378,8 +378,10 @@ func (w *Writer) Err() error {
 	return w.inner.Err()
 }
 
-// ApplyRetention applies the latest pending retention request through this
-// writer's fence. Calls with no newer request are no-ops.
+// ApplyRetention applies retention through this writer's fence. It first
+// finishes any earlier retention with an unknown outcome; a newer mailbox
+// request then requires another call. Calls with no outstanding result or
+// newer request are no-ops.
 func (w *Writer) ApplyRetention(ctx context.Context) (result RetentionResult, err error) {
 	start := time.Now()
 	defer func() {

@@ -19,6 +19,7 @@ type Session struct {
 
 var _ writer.Session = (*Session)(nil)
 var _ writer.RetentionSession = (*Session)(nil)
+var _ writer.RetentionReconciler = (*Session)(nil)
 
 func New(inner catalog.WriterSession) (*Session, error) {
 	if inner == nil {
@@ -89,6 +90,30 @@ func (s *Session) ApplyPendingRetention(ctx context.Context) (writer.RetentionRe
 	if err != nil {
 		return writer.RetentionResult{}, mapRetentionError(err)
 	}
+	return s.retentionResultLocked(result), nil
+}
+
+func (s *Session) ReconcilePendingRetention(ctx context.Context) (writer.RetentionResult, bool, error) {
+	if s == nil || s.inner == nil {
+		return writer.RetentionResult{}, false, fmt.Errorf("%w: nil catalog session", writer.ErrInvalidSession)
+	}
+	inner, ok := s.inner.(catalog.RetentionReconciler)
+	if !ok {
+		return writer.RetentionResult{}, false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result, pending, err := inner.ReconcilePendingRetention(ctx)
+	if err != nil {
+		return writer.RetentionResult{}, pending, mapRetentionError(err)
+	}
+	if !pending {
+		return writer.RetentionResult{}, false, nil
+	}
+	return s.retentionResultLocked(result), true, nil
+}
+
+func (s *Session) retentionResultLocked(result catalog.RetentionApplyResult) writer.RetentionResult {
 	s.snapshot = writer.Snapshot{
 		Head: result.Head,
 		Identity: writer.WriterIdentity{
@@ -101,7 +126,7 @@ func (s *Session) ApplyPendingRetention(ctx context.Context) (writer.RetentionRe
 		PolicyVersion: result.Request.PolicyVersion,
 		RequestedLSN:  result.Head.AppliedRetentionLSN,
 		Applied:       result.Applied,
-	}, nil
+	}
 }
 
 func mapCatalogError(err error) error {
@@ -126,6 +151,9 @@ func mapRetentionError(err error) error {
 	}
 	if errors.Is(err, catalog.ErrRetentionUnsupported) {
 		return fmt.Errorf("%w: %w", writer.ErrRetentionUnsupported, err)
+	}
+	if errors.Is(err, catalog.ErrCommitIndeterminate) {
+		return fmt.Errorf("%w: %w: %w", writer.ErrRetentionFailed, writer.ErrRetentionIndeterminate, err)
 	}
 	return fmt.Errorf("%w: %w", writer.ErrRetentionFailed, err)
 }

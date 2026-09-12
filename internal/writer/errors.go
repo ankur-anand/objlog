@@ -19,6 +19,7 @@ var (
 	ErrInvalidPublishResult        = errors.New("writer: invalid publish result")
 	ErrRetentionUnsupported        = errors.New("writer: retention unsupported")
 	ErrRetentionFailed             = errors.New("writer: retention failed")
+	ErrRetentionIndeterminate      = errors.New("writer: retention outcome unknown")
 
 	errReservationExceedsLimit = errors.New("writer: reservation exceeds configured limit")
 )
