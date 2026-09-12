@@ -16,6 +16,7 @@ type writerSession struct {
 
 var _ csession.WriterSession = (*writerSession)(nil)
 var _ csession.RetentionWriterSession = (*writerSession)(nil)
+var _ csession.RetentionReconciler = (*writerSession)(nil)
 
 func (s *writerSession) Head() pmeta.PartitionHead { return s.session.Head() }
 func (s *writerSession) Epoch() uint64             { return s.session.Epoch() }
@@ -26,6 +27,10 @@ func (s *writerSession) AppendSegment(ctx context.Context, segment pmeta.Segment
 }
 
 func (s *writerSession) ApplyPendingRetention(ctx context.Context) (csession.RetentionApplyResult, error) {
+	// Finish the recorded request before consulting a potentially newer mailbox.
+	if result, pending, err := s.ReconcilePendingRetention(ctx); pending || err != nil {
+		return result, err
+	}
 	if s.session.IsStale() {
 		return csession.RetentionApplyResult{}, fmt.Errorf("%w: partition=%d", csession.ErrStaleWriter, s.session.Partition())
 	}
@@ -33,9 +38,9 @@ func (s *writerSession) ApplyPendingRetention(ctx context.Context) (csession.Ret
 	if err != nil {
 		return csession.RetentionApplyResult{}, err
 	}
-	head, applied, err := s.session.ApplyPendingRetention(ctx, request, found)
-	if err != nil {
-		return csession.RetentionApplyResult{}, err
-	}
-	return csession.RetentionApplyResult{Head: head, Request: request, Applied: applied}, nil
+	return s.session.ApplyPendingRetention(ctx, request, found)
+}
+
+func (s *writerSession) ReconcilePendingRetention(ctx context.Context) (csession.RetentionApplyResult, bool, error) {
+	return s.session.ReconcilePendingRetention(ctx)
 }

@@ -101,6 +101,14 @@ type RetentionWriterSession interface {
 	ApplyPendingRetention(ctx context.Context) (RetentionApplyResult, error)
 }
 
+// RetentionReconciler finishes a retention commit whose outcome was unknown.
+// It does not read the retention mailbox or start a newer policy. The boolean
+// reports whether an outstanding result was acknowledged. With no pending
+// commit, reconciliation performs no storage I/O.
+type RetentionReconciler interface {
+	ReconcilePendingRetention(ctx context.Context) (RetentionApplyResult, bool, error)
+}
+
 // RetentionRequest is the latest monotonic retention command for one
 // partition. BeforeLSN means records below that LSN should be retired at
 // immutable-segment granularity.

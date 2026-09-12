@@ -348,10 +348,18 @@ Exactly one publish worker owns metadata commit for one partition writer.
 
 For each ready segment:
 
-1. call `Session.PublishSegment(...)`;
-2. validate the returned snapshot;
-3. update committed state;
-4. remove the segment from in-flight state.
+1. if supported, reconcile an outstanding retention through `RetentionReconciler`
+   and validate and adopt its snapshot under `sessionMu`;
+2. call `Session.PublishSegment(...)`;
+3. validate the returned snapshot;
+4. update committed state;
+5. remove the segment from in-flight state.
+
+Reconciliation finishes only an earlier operation whose outcome was unknown;
+it does not poll for new retention policies. While that outcome remains unknown,
+the worker keeps ready segments queued and retries with a capped backoff. Each
+reconciliation attempt and subsequent publication has its own catalog timeout.
+Writer shutdown cancels recovery, and a lost fence remains terminal.
 
 There is never more than one concurrent publish for one partition writer.
 

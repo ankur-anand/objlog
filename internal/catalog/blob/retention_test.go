@@ -8,6 +8,9 @@ import (
 	"time"
 
 	pcatalog "github.com/ankur-anand/objlog/internal/catalog"
+	"github.com/ankur-anand/objlog/internal/catalog/writeradapter"
+	"github.com/ankur-anand/objlog/internal/segwriter"
+	plwriter "github.com/ankur-anand/objlog/internal/writer"
 )
 
 func TestBlobCatalogRetentionTrimsMultiLevelHistory(t *testing.T) {
@@ -357,6 +360,90 @@ func TestBlobCatalogRetentionApplyRecoversLostHeadCASResponse(t *testing.T) {
 	}
 	if calls, _ := backend.stats(); calls != 2 {
 		t.Fatalf("head CAS calls = %d, want 2", calls)
+	}
+}
+
+func TestBlobCatalogWriterRetryReconcilesLandedIndeterminateRetention(t *testing.T) {
+	ctx := context.Background()
+	backend := &casFaultBackend{Backend: NewMemoryBackend()}
+	cat, err := New(backend, commitRecoveryTestOptions())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	catalogSession, err := cat.OpenWriter(ctx, 1, [16]byte{1})
+	if err != nil {
+		t.Fatalf("OpenWriter() error = %v", err)
+	}
+	if _, err := catalogSession.AppendSegment(ctx, testSegmentRef(1, 0, 9, catalogSession.Epoch())); err != nil {
+		t.Fatalf("AppendSegment() error = %v", err)
+	}
+	request := pcatalog.RetentionRequest{
+		Version:       pcatalog.RetentionRequestVersion,
+		PolicyVersion: 1,
+		BeforeLSN:     5,
+		CreatedUnixMS: 1,
+	}
+	if _, err := cat.RequestRetention(ctx, 1, request); err != nil {
+		t.Fatalf("RequestRetention() error = %v", err)
+	}
+
+	session, err := writeradapter.New(catalogSession)
+	if err != nil {
+		t.Fatalf("writeradapter.New() error = %v", err)
+	}
+	opts := plwriter.DefaultOptions(plwriter.SinkFactoryFunc(func(context.Context, plwriter.SegmentInfo) (segwriter.Sink, error) {
+		return nil, errors.New("unexpected segment sink creation")
+	}))
+	opts.Session = session
+	w, err := plwriter.New(opts)
+	if err != nil {
+		t.Fatalf("writer.New() error = %v", err)
+	}
+	defer func() { _ = w.Abort(context.Background()) }()
+
+	applyCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	backend.arm(casFaultAfterApplyOnce, false, func() error {
+		cancel()
+		return nil
+	})
+	if _, err := w.ApplyPendingRetention(applyCtx); !errors.Is(err, pcatalog.ErrCommitIndeterminate) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("ApplyPendingRetention(first) error = %v, want indeterminate canceled commit", err)
+	}
+	if err := w.Err(); err != nil {
+		t.Fatalf("Writer.Err() after indeterminate retention = %v, want nil", err)
+	}
+	durable, err := cat.LoadPartition(ctx, 1)
+	if err != nil {
+		t.Fatalf("LoadPartition() error = %v", err)
+	}
+	if durable.AppliedRetentionVersion != request.PolicyVersion || durable.AppliedRetentionLSN != request.BeforeLSN {
+		t.Fatalf("durable retention after indeterminate commit = %+v", durable)
+	}
+
+	changed := w.Committed()
+	result, err := w.ApplyPendingRetention(ctx)
+	if err != nil {
+		t.Fatalf("ApplyPendingRetention(retry) error = %v", err)
+	}
+	if !result.Applied || result.PolicyVersion != request.PolicyVersion || result.RequestedLSN != request.BeforeLSN {
+		t.Fatalf("ApplyPendingRetention(retry) result = %+v, want reconciled application", result)
+	}
+	select {
+	case <-changed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconciled retention did not notify Committed()")
+	}
+	if err := w.Err(); err != nil {
+		t.Fatalf("Writer.Err() after reconciled retention = %v, want nil", err)
+	}
+
+	noOp, err := w.ApplyPendingRetention(ctx)
+	if err != nil {
+		t.Fatalf("ApplyPendingRetention(no-op) error = %v", err)
+	}
+	if noOp.Applied || noOp.Snapshot != result.Snapshot {
+		t.Fatalf("ApplyPendingRetention(no-op) = %+v, want unchanged unapplied snapshot", noOp)
 	}
 }
 

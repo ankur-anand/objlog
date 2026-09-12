@@ -453,6 +453,14 @@ append or retention update from mixing two catalog snapshots.
 
 Visibility is determined only by the committed head.
 
+An indeterminate retention commit remains recorded on its writer session with
+the original request and candidate mutation. Before another mutation, the
+session refreshes the head and either confirms that retention landed or retries
+the recorded mutation against the unchanged predecessor. A moved writer fence
+prevents new mutations. Refreshing or appending does not consume the outstanding
+retention result: an explicit retention call or `RetentionReconciler` acknowledges
+it. Reconciliation does not read or apply a newer mailbox request.
+
 Failure cases:
 
 | Failure point | Visible to readers | Result |
