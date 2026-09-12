@@ -138,7 +138,7 @@ jobs:
           docker run -d --name objlog-minio -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
       - name: Start Azurite
         run: |
           docker run -d --name objlog-azurite -p 10000:10000 \
