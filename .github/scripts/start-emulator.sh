@@ -8,7 +8,7 @@ case "$provider" in
   minio)
     docker run -d --name plbench-minio -p 9000:9000 \
       -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-      minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+      quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
     for _ in $(seq 1 60); do
       curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1 && exit 0
       sleep 1
