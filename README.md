@@ -215,21 +215,7 @@ transcript, flags, and provider wiring: [`examples/`](examples/).
 
 ## How it works
 
-```text
-  Append(record)
-        |
-        v
-  fenced writer  ---- batches by size, count, or age
-        |
-        v
-  immutable segment object  +  catalog page
-        |
-        v
-  S3  ·  GCS  ·  Azure Blob  ·  MinIO
-        |
-        v
-  readers range-read only the blocks they need
-```
+[![Animated objlog architecture: append records, batch and upload an immutable segment, publish the catalog, then discover and range-read committed data directly from object storage.](docs/images/objlog-architecture.svg)](docs/images/objlog-architecture.svg)
 
 - **One fenced writer per partition.** The catalog fence is the arbiter: a
   superseded writer is rejected at publication, and it terminates rather than
@@ -273,42 +259,10 @@ API is `objlog`, the one provider package you use, and `objlog/lifecycle`.
 
 ## Write a reader in any language
 
-You do not need this Go library to read an objlog stream. A foreign reader only
-needs an object-store client and the stream's configured catalog and segment
-prefixes. The read path is:
-
-1. Derive the stream and partition prefixes from the rules in the catalog
-   specification.
-2. Read the catalog head and follow its page references to find the segment
-   covering the requested LSN (or timestamp).
-3. Derive or read that segment object's key, then range-read its trailer,
-   preamble, block index, and the blocks containing the requested records.
-4. Validate hashes, bounds, versions, and cross-references before returning
-   records.
-
-The wire formats and key grammar are language-neutral. They are versioned and
-frozen by checked-in specifications and conformance fixtures:
-
-| Format | Covers | Specification | Corpus |
-| --- | --- | --- | --- |
-| `segformat` v2 | Segment objects: preamble, blocks, block index, records, trailer | [segment specification](internal/segformat/SPEC.md) | [`testdata/segformat/v2`](testdata/segformat/v2) |
-| `catformat` v1 | Catalog head, immutable leaf pages, and index pages | [catalog specification](internal/catalog/blob/SPEC.md) | [`testdata/catformat/v1`](testdata/catformat/v1) |
-
-Both formats use big-endian fields and reject unknown versions. Each fixture
-directory includes a language-neutral `manifest.json` containing the expected
-decoded values. 64-bit integers are decimal strings, hashes are hexadecimal,
-and binary payloads are base64; this avoids JSON number precision loss. The
-fixtures deliberately include LSNs above 2^53, where JavaScript-style JSON
-numbers are no longer exact.
-
-To validate an implementation, verify each fixture's SHA-256, decode it
-according to the relevant specification, and compare every field with the
-manifest. A complete segment reader must handle both fixture variants:
-uncompressed/CRC32C and zstd/XXH64. The compatibility documents describe the
-required checks and the conformance procedure:
-
-[`segformat`](internal/segformat/COMPATIBILITY.md) ·
-[`catformat`](internal/catalog/blob/COMPATIBILITY.md).
+objlog's storage formats are versioned and language-neutral. You can build a
+reader in another language that reads directly from the bucket using an
+object-store client and the published [segment](internal/segformat/SPEC.md)
+and [catalog](internal/catalog/blob/SPEC.md) specifications.
 
 ## Where a broker still fits
 
