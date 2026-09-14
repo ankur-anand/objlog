@@ -182,7 +182,7 @@
   <!-- Independent readers issue requests to the bucket, never to the writer. -->
   <text x="930" y="230" text-anchor="middle" class="step meta">5. Discover</text>
   <text x="930" y="252" text-anchor="middle" class="small muted">read head + pages</text>
-  <text x="930" y="389" text-anchor="middle" class="small meta">segment refs →</text>
+  <text x="996" y="384" text-anchor="end" class="small meta">segment refs</text>
   <text x="909" y="452" text-anchor="middle" class="small data">← range request</text>
   <text x="909" y="552" text-anchor="middle" class="step data">6. Range-read</text>
   <text x="909" y="574" text-anchor="middle" class="small muted">requested blocks →</text>
