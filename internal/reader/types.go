@@ -11,17 +11,41 @@ import (
 )
 
 const (
-	DefaultMaxRecordsPerBatch             = 1024
-	DefaultMaxCachedPartitionHeads        = 16_384
-	CursorCheckpointVersion        uint16 = 1
+	DefaultMaxRecordsPerBatch                  = 1024
+	DefaultMaxCachedPartitionHeads             = 16_384
+	DefaultMaxWholeSegmentBytes                = uint64(8 << 20)
+	DefaultWholeSegmentCacheBytes              = uint64(256 << 20)
+	DefaultWholeSegmentThresholdPercent        = 50
+	CursorCheckpointVersion             uint16 = 1
+)
+
+// ReadStrategy controls how immutable segment objects are fetched.
+type ReadStrategy uint8
+
+const (
+	// ReadRanges preserves the bounded range-read behavior.
+	ReadRanges ReadStrategy = iota
+	// ReadWholeSegment fetches eligible segment objects in one request.
+	ReadWholeSegment
+	// ReadAuto loads whole objects for broad one-shot reads and broad remaining
+	// cursor/tailer spans. Point and narrow cache misses use ranges, while any
+	// read may reuse a compatible whole object already resident in memory.
+	ReadAuto
 )
 
 type SegmentStore = segreader.SegmentStore
 
 type Options struct {
-	MaxRecordsPerBatch      int
-	MaxCachedPartitionHeads int
-	SegmentOptions          segreader.Options
+	MaxRecordsPerBatch           int
+	MaxCachedPartitionHeads      int
+	ReadStrategy                 ReadStrategy
+	MaxWholeSegmentBytes         uint64
+	WholeSegmentCacheBytes       uint64
+	WholeSegmentThresholdPercent int
+	SegmentOptions               segreader.Options
+	// WholeSegmentStore bypasses decorators intended for small exact ranges.
+	// When nil, New uses SegmentStore for both range and whole-object reads.
+	WholeSegmentStore SegmentStore
 	// SegmentCache is cleared by Reader.Close. Do not share it with a Reader
 	// whose lifecycle is independent.
 	SegmentCache *SegmentReaderCache
@@ -30,10 +54,12 @@ type Options struct {
 }
 
 type Reader struct {
-	catalog catalog.Reader
-	store   SegmentStore
-	opts    Options
-	refresh *refreshCoordinator
+	catalog       catalog.Reader
+	store         SegmentStore
+	wholeStore    SegmentStore
+	wholeSegments *wholeSegmentCache
+	opts          Options
+	refresh       *refreshCoordinator
 
 	lifecycleMu sync.Mutex
 	closed      bool
@@ -58,6 +84,9 @@ const (
 	MetricTailNext       MetricName = "reader.tail_next"
 	MetricCatalogRefresh MetricName = "reader.catalog_refresh"
 	MetricSegmentRead    MetricName = "reader.segment_read"
+	// MetricWholeReadFallback reports that a whole-object read selected by the
+	// strategy used ranges because active whole reads occupied the cache budget.
+	MetricWholeReadFallback MetricName = "reader.whole_read_fallback"
 )
 
 type MetricEvent struct {

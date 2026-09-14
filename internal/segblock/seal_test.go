@@ -57,6 +57,45 @@ func TestSealOwnedCodecNoneTransfersRawOwnership(t *testing.T) {
 	}
 }
 
+func TestOpenBorrowedCodecNoneReusesImmutableStoredBytes(t *testing.T) {
+	raw := singleRawBlock(t)
+	sealed, err := Seal(segformat.CodecNone, segformat.HashXXH64, raw, Meta{
+		BaseLSN:        10,
+		RecordCount:    1,
+		MinTimestampMS: 100,
+		MaxTimestampMS: 100,
+	})
+	if err != nil {
+		t.Fatalf("Seal() error = %v", err)
+	}
+
+	opened, err := OpenBorrowed(segformat.CodecNone, segformat.HashXXH64, sealed.Preamble, sealed.Stored)
+	if err != nil {
+		t.Fatalf("OpenBorrowed() error = %v", err)
+	}
+	if len(opened) == 0 || &opened[0] != &sealed.Stored[0] {
+		t.Fatal("OpenBorrowed(codec none) copied immutable stored bytes")
+	}
+}
+
+func TestOpenBorrowedStillValidatesStoredHash(t *testing.T) {
+	raw := singleRawBlock(t)
+	sealed, err := Seal(segformat.CodecNone, segformat.HashXXH64, raw, Meta{
+		BaseLSN:        10,
+		RecordCount:    1,
+		MinTimestampMS: 100,
+		MaxTimestampMS: 100,
+	})
+	if err != nil {
+		t.Fatalf("Seal() error = %v", err)
+	}
+	sealed.Stored[0] ^= 1
+
+	if _, err := OpenBorrowed(segformat.CodecNone, segformat.HashXXH64, sealed.Preamble, sealed.Stored); !errors.Is(err, segformat.ErrIntegrityMismatch) {
+		t.Fatalf("OpenBorrowed(corrupt) error = %v, want %v", err, segformat.ErrIntegrityMismatch)
+	}
+}
+
 func TestSealOpenRoundTripZstd(t *testing.T) {
 	raw, err := segformat.EncodeRawBlock([]segformat.RawRecord{
 		{TimestampMS: 100, Value: bytes.Repeat([]byte("a"), 256)},

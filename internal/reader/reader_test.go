@@ -35,6 +35,136 @@ func TestConsumeSingleSegment(t *testing.T) {
 	}
 }
 
+func TestConsumeAutoReadsWholeSegmentForBroadRead(t *testing.T) {
+	t.Parallel()
+
+	fixture := newReaderFixture(t)
+	segment := fixture.appendSegment(t, 0, 20)
+	store := newCountingSegmentStore(fixture.store)
+	r, err := New(fixture.catalog, store, Options{
+		MaxRecordsPerBatch: 20,
+		ReadStrategy:       ReadAuto,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := r.Consume(context.Background(), ConsumeRequest{Partition: fixture.partition, StartLSN: 0, Limit: 20})
+	if err != nil {
+		t.Fatalf("Consume() error = %v", err)
+	}
+	assertRecordsEqual(t, result.Records, fixture.records)
+	if got := store.readCount(); got != 1 {
+		t.Fatalf("segment reads = %d, want one whole-object read", got)
+	}
+	if got := store.rangeReadCount(segment.URI, 0, segment.SizeBytes); got != 1 {
+		t.Fatalf("whole-object reads = %d, want 1", got)
+	}
+}
+
+func TestConsumeAutoReusesWholeSegmentAcrossCalls(t *testing.T) {
+	t.Parallel()
+
+	fixture := newReaderFixture(t)
+	segment := fixture.appendSegment(t, 0, 20)
+	store := newCountingSegmentStore(fixture.store)
+	r, err := New(fixture.catalog, store, Options{
+		MaxRecordsPerBatch:     10,
+		ReadStrategy:           ReadAuto,
+		MaxWholeSegmentBytes:   segment.SizeBytes,
+		WholeSegmentCacheBytes: segment.SizeBytes,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	request := ConsumeRequest{Partition: fixture.partition, StartLSN: 0, Limit: 10}
+	for call := 0; call < 2; call++ {
+		if _, err := r.Consume(context.Background(), request); err != nil {
+			t.Fatalf("Consume(%d) error = %v", call, err)
+		}
+	}
+	if got := store.readCount(); got != 1 {
+		t.Fatalf("total object-store reads = %d, want one shared whole-object load", got)
+	}
+}
+
+func TestAutoUsesResidentWholeSegmentForNarrowAndPointReads(t *testing.T) {
+	t.Parallel()
+
+	fixture := newReaderFixture(t)
+	segment := fixture.appendSegment(t, 0, 20)
+	store := newCountingSegmentStore(fixture.store)
+	r, err := New(fixture.catalog, store, Options{
+		MaxRecordsPerBatch:     20,
+		ReadStrategy:           ReadAuto,
+		MaxWholeSegmentBytes:   segment.SizeBytes,
+		WholeSegmentCacheBytes: segment.SizeBytes,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := r.Consume(context.Background(), ConsumeRequest{Partition: fixture.partition, StartLSN: 0, Limit: 20}); err != nil {
+		t.Fatalf("broad Consume() error = %v", err)
+	}
+	if got := store.readCount(); got != 1 {
+		t.Fatalf("broad read object-store calls = %d, want 1", got)
+	}
+
+	if _, err := r.Consume(context.Background(), ConsumeRequest{Partition: fixture.partition, StartLSN: 19, Limit: 1}); err != nil {
+		t.Fatalf("narrow Consume() error = %v", err)
+	}
+	if _, err := r.Fetch(context.Background(), FetchRequest{Partition: fixture.partition, LSN: 18}); err != nil {
+		t.Fatalf("Fetch() error = %v", err)
+	}
+	if got := store.readCount(); got != 1 {
+		t.Fatalf("object-store calls after resident narrow reads = %d, want 1", got)
+	}
+}
+
+func TestConsumeAutoUsesRangesForNarrowRead(t *testing.T) {
+	t.Parallel()
+
+	fixture := newReaderFixture(t)
+	segment := fixture.appendSegment(t, 0, 20)
+	store := newCountingSegmentStore(fixture.store)
+	r, err := New(fixture.catalog, store, Options{
+		MaxRecordsPerBatch: 20,
+		ReadStrategy:       ReadAuto,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := r.Consume(context.Background(), ConsumeRequest{Partition: fixture.partition, StartLSN: 0, Limit: 1}); err != nil {
+		t.Fatalf("Consume() error = %v", err)
+	}
+	if got := store.rangeReadCount(segment.URI, 0, segment.SizeBytes); got != 0 {
+		t.Fatalf("whole-object reads = %d, want 0", got)
+	}
+	if got := store.readCount(); got != 4 {
+		t.Fatalf("segment reads = %d, want 3 metadata ranges and 1 block", got)
+	}
+}
+
+func TestFetchAutoUsesRanges(t *testing.T) {
+	t.Parallel()
+
+	fixture := newReaderFixture(t)
+	segment := fixture.appendSegment(t, 0, 20)
+	store := newCountingSegmentStore(fixture.store)
+	r, err := New(fixture.catalog, store, Options{ReadStrategy: ReadAuto})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := r.Fetch(context.Background(), FetchRequest{Partition: fixture.partition, LSN: 0}); err != nil {
+		t.Fatalf("Fetch() error = %v", err)
+	}
+	if got := store.rangeReadCount(segment.URI, 0, segment.SizeBytes); got != 0 {
+		t.Fatalf("whole-object reads = %d, want 0", got)
+	}
+}
+
 func TestConsumeAcrossSegments(t *testing.T) {
 	t.Parallel()
 
@@ -408,6 +538,36 @@ func TestConsumeFromTimestampAcrossSegments(t *testing.T) {
 	}
 }
 
+func TestConsumeFromTimestampAutoUsesWholeReadForBroadBatch(t *testing.T) {
+	t.Parallel()
+
+	fixture := newReaderFixture(t)
+	segment := fixture.appendSegment(t, 0, 20)
+	store := newCountingSegmentStore(fixture.store)
+	r, err := New(fixture.catalog, store, Options{
+		MaxRecordsPerBatch:     20,
+		ReadStrategy:           ReadAuto,
+		MaxWholeSegmentBytes:   segment.SizeBytes,
+		WholeSegmentCacheBytes: segment.SizeBytes,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := r.ConsumeFromTimestamp(context.Background(), ConsumeFromTimestampRequest{
+		Partition:   fixture.partition,
+		TimestampMS: fixture.records[0].TimestampMS,
+		Limit:       20,
+	})
+	if err != nil {
+		t.Fatalf("ConsumeFromTimestamp() error = %v", err)
+	}
+	assertRecordsEqual(t, result.Records, fixture.records)
+	if got := store.rangeReadCount(segment.URI, 0, segment.SizeBytes); got != 1 {
+		t.Fatalf("whole-object reads = %d, want 1 for broad timestamp consume", got)
+	}
+}
+
 func TestConsumeFromTimestampBeforeOldestStartsAtOldest(t *testing.T) {
 	t.Parallel()
 
@@ -709,7 +869,7 @@ type readerFixture struct {
 	nextURI   int
 }
 
-func newReaderFixture(t *testing.T) *readerFixture {
+func newReaderFixture(t testing.TB) *readerFixture {
 	t.Helper()
 	cat := catalog.NewMemoryCatalog()
 	writerID := [16]byte{9, 8, 7}
@@ -727,7 +887,7 @@ func newReaderFixture(t *testing.T) *readerFixture {
 	}
 }
 
-func (f *readerFixture) openReader(t *testing.T, opts Options) *Reader {
+func (f *readerFixture) openReader(t testing.TB, opts Options) *Reader {
 	t.Helper()
 	r, err := New(f.catalog, f.store, opts)
 	if err != nil {
@@ -736,16 +896,21 @@ func (f *readerFixture) openReader(t *testing.T, opts Options) *Reader {
 	return r
 }
 
-func (f *readerFixture) appendSegment(t *testing.T, baseLSN uint64, count int) pmeta.SegmentRef {
+func (f *readerFixture) appendSegment(t testing.TB, baseLSN uint64, count int) pmeta.SegmentRef {
+	t.Helper()
+	return f.appendSegmentWithOptions(t, baseLSN, count, 48, 256, segformat.CodecNone)
+}
+
+func (f *readerFixture) appendSegmentWithOptions(t testing.TB, baseLSN uint64, count int, valueSize int, blockSize int, codec segformat.Codec) pmeta.SegmentRef {
 	t.Helper()
 	uri := fmt.Sprintf("memory://reader-test/%d", f.nextURI)
 	f.nextURI++
-	records := makeWriterRecords(count, baseLSN, 10_000+int64(baseLSN), 48)
+	records := makeWriterRecords(count, baseLSN, 10_000+int64(baseLSN), valueSize)
 	sink := segwriter.NewMemorySink(uri)
 	opts := segwriter.DefaultOptions(f.partition)
-	opts.Codec = segformat.CodecNone
+	opts.Codec = codec
 	opts.HashAlgo = segformat.HashXXH64
-	opts.TargetBlockSize = 256
+	opts.TargetBlockSize = blockSize
 	opts.PartSize = 128
 	opts.SealParallelism = 2
 	opts.BlockBufferCount = 5
@@ -971,6 +1136,22 @@ func (s *countingSegmentStore) metadataReads(segment pmeta.SegmentRef) int {
 	return s.reads[segmentReadKey{uri: segment.URI, off: segment.SizeBytes - segformat.TrailerSize, n: segformat.TrailerSize}] +
 		s.reads[segmentReadKey{uri: segment.URI, off: 0, n: segformat.FilePreambleSize}] +
 		s.reads[segmentReadKey{uri: segment.URI, off: segment.BlockIndexOffset, n: uint64(segment.BlockIndexLength)}]
+}
+
+func (s *countingSegmentStore) readCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	total := 0
+	for _, count := range s.reads {
+		total += count
+	}
+	return total
+}
+
+func (s *countingSegmentStore) rangeReadCount(uri string, off uint64, n uint64) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reads[segmentReadKey{uri: uri, off: off, n: n}]
 }
 
 type stubCatalog struct {

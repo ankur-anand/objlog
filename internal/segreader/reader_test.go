@@ -44,6 +44,70 @@ func TestOpenReadAllZstd(t *testing.T) {
 	}
 }
 
+func TestOpenWholeReadsRemoteObjectOnce(t *testing.T) {
+	t.Parallel()
+
+	for _, codec := range []segformat.Codec{segformat.CodecNone, segformat.CodecZstd} {
+		codec := codec
+		t.Run(codec.String(), func(t *testing.T) {
+			t.Parallel()
+			fixture := buildSegment(t, codec, segformat.HashXXH64, 96, 500, 10_000, 256)
+			store := newCountingStore(newMemoryStore(map[string][]byte{fixture.ref.URI: fixture.object}))
+
+			reader, err := OpenWhole(context.Background(), store, fixture.ref, DefaultOptions())
+			if err != nil {
+				t.Fatalf("OpenWhole() error = %v", err)
+			}
+			records, err := reader.Read(context.Background(), fixture.ref.BaseLSN, 0)
+			if err != nil {
+				t.Fatalf("Read() error = %v", err)
+			}
+			assertRecordsEqual(t, records, fixture.records)
+
+			reads := store.reads()
+			if len(reads) != 1 || reads[0].off != 0 || reads[0].n != fixture.ref.SizeBytes {
+				t.Fatalf("remote reads = %+v, want one whole-object read", reads)
+			}
+		})
+	}
+}
+
+func TestOpenWholeHonorsCancellation(t *testing.T) {
+	t.Parallel()
+
+	fixture := buildSegment(t, segformat.CodecNone, segformat.HashXXH64, 8, 1, 1, 16)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	store := newCountingStore(newMemoryStore(map[string][]byte{fixture.ref.URI: fixture.object}))
+
+	_, err := OpenWhole(ctx, store, fixture.ref, DefaultOptions())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("OpenWhole() error = %v, want %v", err, context.Canceled)
+	}
+	if len(store.reads()) != 0 {
+		t.Fatalf("remote reads = %+v, want none", store.reads())
+	}
+}
+
+func TestOpenWholeValidatesSegmentHashFromMemory(t *testing.T) {
+	t.Parallel()
+
+	fixture := buildSegment(t, segformat.CodecNone, segformat.HashXXH64, 16, 1, 1, 24)
+	object := append([]byte(nil), fixture.object...)
+	object[segformat.FilePreambleSize+segformat.BlockPreambleSize] ^= 0xff
+	store := newCountingStore(newMemoryStore(map[string][]byte{fixture.ref.URI: object}))
+	opts := DefaultOptions()
+	opts.ValidateSegmentHash = true
+
+	_, err := OpenWhole(context.Background(), store, fixture.ref, opts)
+	if !errors.Is(err, ErrCorruptData) {
+		t.Fatalf("OpenWhole() error = %v, want %v", err, ErrCorruptData)
+	}
+	if got := len(store.reads()); got != 1 {
+		t.Fatalf("remote reads = %d, want 1", got)
+	}
+}
+
 func TestOpenReadAllCRC32C(t *testing.T) {
 	t.Parallel()
 
@@ -298,7 +362,12 @@ type segmentFixture struct {
 	records []Record
 }
 
-func buildSegment(t *testing.T, codec segformat.Codec, hashAlgo segformat.HashAlgo, count int, baseLSN uint64, baseTS int64, valueSize int) segmentFixture {
+func buildSegment(t testing.TB, codec segformat.Codec, hashAlgo segformat.HashAlgo, count int, baseLSN uint64, baseTS int64, valueSize int) segmentFixture {
+	t.Helper()
+	return buildSegmentWithBlockSize(t, codec, hashAlgo, count, baseLSN, baseTS, valueSize, 256)
+}
+
+func buildSegmentWithBlockSize(t testing.TB, codec segformat.Codec, hashAlgo segformat.HashAlgo, count int, baseLSN uint64, baseTS int64, valueSize int, blockSize int) segmentFixture {
 	t.Helper()
 	writerRecords := makeWriterRecords(count, baseLSN, baseTS, valueSize)
 
@@ -307,7 +376,7 @@ func buildSegment(t *testing.T, codec segformat.Codec, hashAlgo segformat.HashAl
 	opts := segwriter.DefaultOptions(7)
 	opts.Codec = codec
 	opts.HashAlgo = hashAlgo
-	opts.TargetBlockSize = 256
+	opts.TargetBlockSize = blockSize
 	opts.PartSize = 128
 	opts.SealParallelism = 2
 	opts.BlockBufferCount = 5

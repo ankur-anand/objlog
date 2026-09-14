@@ -7,6 +7,18 @@ import (
 )
 
 func Open(codec segformat.Codec, hashAlgo segformat.HashAlgo, preamble segformat.BlockPreamble, stored []byte) ([]byte, error) {
+	return open(codec, hashAlgo, preamble, stored, false)
+}
+
+// OpenBorrowed verifies and opens stored while borrowing its immutable bytes.
+// For CodecNone the returned raw block aliases stored; callers must keep stored
+// alive and unchanged for the lifetime of the returned bytes. Compressed
+// codecs still return an owned decompression buffer.
+func OpenBorrowed(codec segformat.Codec, hashAlgo segformat.HashAlgo, preamble segformat.BlockPreamble, stored []byte) ([]byte, error) {
+	return open(codec, hashAlgo, preamble, stored, true)
+}
+
+func open(codec segformat.Codec, hashAlgo segformat.HashAlgo, preamble segformat.BlockPreamble, stored []byte, borrowStored bool) ([]byte, error) {
 	if err := codec.Validate(); err != nil {
 		return nil, err
 	}
@@ -26,7 +38,7 @@ func Open(codec segformat.Codec, hashAlgo segformat.HashAlgo, preamble segformat
 	if gotHash != preamble.BlockHash {
 		return nil, fmt.Errorf("%w: block hash got=%x want=%x", segformat.ErrIntegrityMismatch, gotHash, preamble.BlockHash)
 	}
-	raw, err := decodeStored(codec, stored, preamble.RawSize)
+	raw, err := decodeStored(codec, stored, preamble.RawSize, borrowStored)
 	if err != nil {
 		return nil, err
 	}
@@ -36,9 +48,12 @@ func Open(codec segformat.Codec, hashAlgo segformat.HashAlgo, preamble segformat
 	return raw, nil
 }
 
-func decodeStored(codec segformat.Codec, stored []byte, rawSize uint32) ([]byte, error) {
+func decodeStored(codec segformat.Codec, stored []byte, rawSize uint32, borrowStored bool) ([]byte, error) {
 	switch codec {
 	case segformat.CodecNone:
+		if borrowStored {
+			return stored, nil
+		}
 		return append([]byte(nil), stored...), nil
 	case segformat.CodecZstd:
 		dec := getZstdDecoder()

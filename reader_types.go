@@ -26,6 +26,9 @@ type ReadRecord = plreader.Record
 // SegmentStore reads byte ranges from committed segment objects.
 type SegmentStore = plreader.SegmentStore
 
+// ReadStrategy controls how immutable segment objects are fetched.
+type ReadStrategy = plreader.ReadStrategy
+
 // ReadResult is returned by one-shot reads, cursors, and tailers.
 type ReadResult = plreader.ReadResult
 
@@ -55,13 +58,20 @@ type RefreshPolicy = plreader.RefreshPolicy
 type Freshness = plreader.Freshness
 
 const (
-	CursorCheckpointVersion        = plreader.CursorCheckpointVersion
-	DefaultMaxCachedPartitionHeads = plreader.DefaultMaxCachedPartitionHeads
+	CursorCheckpointVersion             = plreader.CursorCheckpointVersion
+	DefaultMaxCachedPartitionHeads      = plreader.DefaultMaxCachedPartitionHeads
+	DefaultMaxWholeSegmentBytes         = plreader.DefaultMaxWholeSegmentBytes
+	DefaultWholeSegmentCacheBytes       = plreader.DefaultWholeSegmentCacheBytes
+	DefaultWholeSegmentThresholdPercent = plreader.DefaultWholeSegmentThresholdPercent
 
 	FreshnessDefault = plreader.FreshnessDefault
 	FreshnessCached  = plreader.FreshnessCached
 	FreshnessOnTail  = plreader.FreshnessOnTail
 	FreshnessLatest  = plreader.FreshnessLatest
+
+	ReadRanges       = plreader.ReadRanges
+	ReadWholeSegment = plreader.ReadWholeSegment
+	ReadAuto         = plreader.ReadAuto
 )
 
 var (

@@ -13,9 +13,10 @@ import (
 // Reader reads one immutable segment object. It is safe for concurrent Read or
 // Scan calls after Open returns.
 type Reader struct {
-	store SegmentStore
-	ref   pmeta.SegmentRef
-	opts  Options
+	store        SegmentStore
+	ref          pmeta.SegmentRef
+	opts         Options
+	borrowBlocks bool
 
 	preamble segformat.FilePreamble
 	trailer  segformat.Trailer
@@ -23,23 +24,34 @@ type Reader struct {
 }
 
 func Open(ctx context.Context, store SegmentStore, ref pmeta.SegmentRef, opts Options) (*Reader, error) {
-	if store == nil {
-		return nil, fmt.Errorf("%w: store is nil", ErrInvalidOptions)
-	}
-	normalized, err := normalizeOptions(opts)
+	normalized, err := validateOpen(store, ref, opts)
 	if err != nil {
 		return nil, err
 	}
+	return open(ctx, store, ref, normalized, false)
+}
+
+func validateOpen(store SegmentStore, ref pmeta.SegmentRef, opts Options) (Options, error) {
+	if store == nil {
+		return Options{}, fmt.Errorf("%w: store is nil", ErrInvalidOptions)
+	}
+	normalized, err := normalizeOptions(opts)
+	if err != nil {
+		return Options{}, err
+	}
 	if err := ref.Validate(); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidSegment, err)
+		return Options{}, fmt.Errorf("%w: %w", ErrInvalidSegment, err)
 	}
 	if ref.SizeBytes < segformat.FilePreambleSize+segformat.TrailerSize {
-		return nil, fmt.Errorf("%w: object too small: size=%d", ErrInvalidSegment, ref.SizeBytes)
+		return Options{}, fmt.Errorf("%w: object too small: size=%d", ErrInvalidSegment, ref.SizeBytes)
 	}
 	if uint64(ref.BlockIndexLength) > normalized.MaxIndexBytes {
-		return nil, fmt.Errorf("%w: block index bytes=%d max=%d", ErrInvalidSegment, ref.BlockIndexLength, normalized.MaxIndexBytes)
+		return Options{}, fmt.Errorf("%w: block index bytes=%d max=%d", ErrInvalidSegment, ref.BlockIndexLength, normalized.MaxIndexBytes)
 	}
+	return normalized, nil
+}
 
+func open(ctx context.Context, store SegmentStore, ref pmeta.SegmentRef, normalized Options, borrowBlocks bool) (*Reader, error) {
 	trailerOff := ref.SizeBytes - segformat.TrailerSize
 	trailerBytes, err := readAtExact(ctx, store, ref.URI, trailerOff, segformat.TrailerSize)
 	if err != nil {
@@ -85,12 +97,13 @@ func Open(ctx context.Context, store SegmentStore, ref pmeta.SegmentRef, opts Op
 	}
 
 	return &Reader{
-		store:    store,
-		ref:      ref,
-		opts:     normalized,
-		preamble: preamble,
-		trailer:  trailer,
-		index:    append([]segformat.BlockIndexEntry(nil), index...),
+		store:        store,
+		ref:          ref,
+		opts:         normalized,
+		borrowBlocks: borrowBlocks,
+		preamble:     preamble,
+		trailer:      trailer,
+		index:        append([]segformat.BlockIndexEntry(nil), index...),
 	}, nil
 }
 
@@ -222,7 +235,16 @@ func (r *Reader) openBlockScanner(ctx context.Context, idx int) (segformat.RawBl
 	if err := segformat.MatchBlockIndexEntry(blockPreamble, entry); err != nil {
 		return segformat.RawBlockScanner{}, fmt.Errorf("%w: block/index mismatch: %w", ErrCorruptData, err)
 	}
-	raw, err := segblock.Open(r.trailer.Codec, r.trailer.HashAlgo, blockPreamble, blockBytes[segformat.BlockPreambleSize:])
+	stored := blockBytes[segformat.BlockPreambleSize:]
+	var raw []byte
+	if r.borrowBlocks {
+		// A whole-object reader owns an immutable backing buffer, so CodecNone
+		// blocks can be scanned directly after hash verification. Scanner.Next
+		// still detaches every record returned to the caller.
+		raw, err = segblock.OpenBorrowed(r.trailer.Codec, r.trailer.HashAlgo, blockPreamble, stored)
+	} else {
+		raw, err = segblock.Open(r.trailer.Codec, r.trailer.HashAlgo, blockPreamble, stored)
+	}
 	if err != nil {
 		return segformat.RawBlockScanner{}, fmt.Errorf("%w: open block: %w", ErrCorruptData, err)
 	}

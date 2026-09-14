@@ -54,6 +54,21 @@ type ReaderOptions struct {
 	// memory. It avoids repeatedly opening and parsing hot segment metadata.
 	OpenSegmentReaders int
 
+	// ReadStrategy controls whether segment data is fetched with bounded range
+	// requests, one whole-object request, or an automatic choice. The zero value
+	// preserves range reads.
+	ReadStrategy ReadStrategy
+	// MaxWholeSegmentBytes bounds a whole-object read. Zero uses 8 MiB.
+	MaxWholeSegmentBytes uint64
+	// WholeSegmentCacheBytes bounds complete segment objects shared by read
+	// calls. Entries are pinned only for the duration of an active call. Zero
+	// uses 256 MiB and must be at least MaxWholeSegmentBytes.
+	WholeSegmentCacheBytes uint64
+	// WholeSegmentThresholdPercent is the minimum fraction of a segment's
+	// records used before Auto fetches the whole object. One-shot reads use the
+	// requested batch; Cursor and Tailer use the segment remainder. Zero uses 50.
+	WholeSegmentThresholdPercent int
+
 	Refresh RefreshPolicy
 }
 
@@ -437,11 +452,20 @@ func newReader(store Store, opts ReaderOptions, metrics Metrics) (*Reader, error
 	if segmentStore == nil {
 		return nil, fmt.Errorf("objlog: nil segment store")
 	}
+	// Whole-object reads must bypass the exact-range cache. Caching a complete
+	// object under one range key cannot serve block reads and would evict the
+	// small metadata and data ranges that cache is designed to retain.
+	wholeSegmentStore := segmentStore
 
 	ropts := reader.Options{
-		MaxRecordsPerBatch:      opts.MaxRecordsPerBatch,
-		MaxCachedPartitionHeads: opts.MaxCachedPartitionHeads,
-		Refresh:                 opts.Refresh,
+		MaxRecordsPerBatch:           opts.MaxRecordsPerBatch,
+		MaxCachedPartitionHeads:      opts.MaxCachedPartitionHeads,
+		ReadStrategy:                 opts.ReadStrategy,
+		MaxWholeSegmentBytes:         opts.MaxWholeSegmentBytes,
+		WholeSegmentCacheBytes:       opts.WholeSegmentCacheBytes,
+		WholeSegmentThresholdPercent: opts.WholeSegmentThresholdPercent,
+		WholeSegmentStore:            wholeSegmentStore,
+		Refresh:                      opts.Refresh,
 	}
 	if metrics != nil {
 		ropts.Observer = readerMetricsAdapter{metrics: metrics}
