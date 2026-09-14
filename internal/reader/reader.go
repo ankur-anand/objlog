@@ -23,12 +23,18 @@ func New(cat catalog.Reader, store SegmentStore, opts Options) (*Reader, error) 
 	if err != nil {
 		return nil, err
 	}
+	wholeStore := normalized.WholeSegmentStore
+	if wholeStore == nil {
+		wholeStore = store
+	}
 	return &Reader{
-		catalog: cat,
-		store:   store,
-		opts:    normalized,
-		refresh: newRefreshCoordinator(cat, normalized.Refresh, normalized.MaxCachedPartitionHeads, normalized.Observer),
-		watches: make(map[*Watch]struct{}),
+		catalog:       cat,
+		store:         store,
+		wholeStore:    wholeStore,
+		wholeSegments: newWholeSegmentCache(normalized.WholeSegmentCacheBytes),
+		opts:          normalized,
+		refresh:       newRefreshCoordinator(cat, normalized.Refresh, normalized.MaxCachedPartitionHeads, normalized.Observer),
+		watches:       make(map[*Watch]struct{}),
 	}, nil
 }
 
@@ -59,6 +65,7 @@ func (r *Reader) Close() error {
 		}
 	}
 	r.refresh.close()
+	r.wholeSegments.Close()
 	if r.opts.SegmentCache != nil {
 		r.opts.SegmentCache.Clear()
 	}
@@ -177,7 +184,7 @@ func (r *Reader) fetchFromHead(ctx context.Context, head pmeta.PartitionHead, re
 		return FetchResult{}, fmt.Errorf("%w: segment base_lsn=%d last_lsn=%d does not contain lsn=%d", ErrCorruptData, segment.BaseLSN, segment.LastLSN, req.LSN)
 	}
 
-	records, err := r.readSegment(ctx, segment, req.LSN, 1, head.NextLSN)
+	records, err := r.readSegment(ctx, segment, req.LSN, 1, head.NextLSN, readIntentPoint)
 	if err != nil {
 		return FetchResult{}, err
 	}
@@ -240,6 +247,21 @@ func (r *Reader) consumeWithHead(ctx context.Context, head pmeta.PartitionHead, 
 	}
 	limit := r.normalizedLimit(req.Limit)
 	return r.consumeFromHead(ctx, head, req.Partition, req.StartLSN, limit)
+}
+
+// consumeContinuousWithHead uses a cursor's segment hint for the first lookup,
+// then follows the same cross-segment batch semantics as a one-shot read.
+func (r *Reader) consumeContinuousWithHead(ctx context.Context, head pmeta.PartitionHead, req ConsumeRequest, hint *pmeta.SegmentRef) (ConsumeResult, *pmeta.SegmentRef, error) {
+	if err := ctx.Err(); err != nil {
+		return ConsumeResult{}, hint, err
+	}
+	if req.Limit < 0 {
+		return ConsumeResult{}, nil, fmt.Errorf("%w: limit=%d", ErrInvalidRequest, req.Limit)
+	}
+	if head.Partition != req.Partition {
+		return ConsumeResult{}, nil, fmt.Errorf("%w: head partition=%d request partition=%d", ErrInvalidRequest, head.Partition, req.Partition)
+	}
+	return r.consumeContinuousFromHead(ctx, head, req.Partition, req.StartLSN, r.normalizedLimit(req.Limit), hint)
 }
 
 func (r *Reader) ConsumeFromTimestamp(ctx context.Context, req ConsumeFromTimestampRequest) (result ConsumeResult, err error) {
@@ -316,31 +338,38 @@ func (r *Reader) consumeFromTimestampLookup(ctx context.Context, req ConsumeFrom
 	if !ok {
 		return ConsumeResult{}, fmt.Errorf("%w: segment uri=%s max_timestamp_ms=%d but no record >= %d", ErrCorruptData, segment.URI, segment.MaxTimestampMS, req.TimestampMS)
 	}
-	return r.consumeFromHeadOnce(ctx, head, req.Partition, startLSN, limit)
+	// Timestamp lookup is a point operation, but the requested batch is a
+	// forward sequential read and should use the normal Auto threshold.
+	result, _, err = r.consumeFromHeadOnce(ctx, head, req.Partition, startLSN, limit, readIntentSequential, nil)
+	return result, err
 }
 
 func (r *Reader) consumeFromHead(ctx context.Context, head pmeta.PartitionHead, partition uint32, startLSN uint64, limit int) (ConsumeResult, error) {
-	result, err := r.consumeFromHeadOnce(ctx, head, partition, startLSN, limit)
+	result, _, err := r.consumeFromHeadOnce(ctx, head, partition, startLSN, limit, readIntentSequential, nil)
 	if err == nil {
 		return result, nil
 	}
 	if errors.Is(err, ErrLSNExpired) {
 		return ConsumeResult{}, err
 	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return ConsumeResult{}, err
+	}
 	fresh, retryErr := r.refreshAfterReadAnomaly(ctx, partition, startLSN, err)
 	if retryErr != nil {
 		return ConsumeResult{}, retryErr
 	}
-	return r.consumeFromHeadOnce(ctx, fresh, partition, startLSN, limit)
+	result, _, err = r.consumeFromHeadOnce(ctx, fresh, partition, startLSN, limit, readIntentSequential, nil)
+	return result, err
 }
 
-func (r *Reader) consumeFromHeadOnce(ctx context.Context, head pmeta.PartitionHead, partition uint32, startLSN uint64, limit int) (ConsumeResult, error) {
+func (r *Reader) consumeFromHeadOnce(ctx context.Context, head pmeta.PartitionHead, partition uint32, startLSN uint64, limit int, intent readIntent, hint *pmeta.SegmentRef) (ConsumeResult, *pmeta.SegmentRef, error) {
 	result := ConsumeResult{
 		Head:    head,
 		NextLSN: startLSN,
 	}
 	if startLSN < head.OldestLSN {
-		return ConsumeResult{}, LSNExpiredError{
+		return ConsumeResult{}, nil, LSNExpiredError{
 			Requested: startLSN,
 			Oldest:    head.OldestLSN,
 			HeadNext:  head.NextLSN,
@@ -348,61 +377,108 @@ func (r *Reader) consumeFromHeadOnce(ctx context.Context, head pmeta.PartitionHe
 	}
 	if !head.HasLastSegment {
 		if startLSN < head.NextLSN {
-			return ConsumeResult{}, fmt.Errorf("%w: partition=%d has no last segment for live lsn=%d oldest_lsn=%d next_lsn=%d", ErrCorruptData, partition, startLSN, head.OldestLSN, head.NextLSN)
+			return ConsumeResult{}, nil, fmt.Errorf("%w: partition=%d has no last segment for live lsn=%d oldest_lsn=%d next_lsn=%d", ErrCorruptData, partition, startLSN, head.OldestLSN, head.NextLSN)
 		}
-		return result, nil
+		return result, nil, nil
 	}
 	if startLSN >= head.NextLSN {
-		return result, nil
+		return result, nil, nil
 	}
 
 	next := startLSN
 	for next < head.NextLSN && len(result.Records) < limit {
-		page, err := r.catalog.ListSegments(ctx, catalog.ListSegmentsRequest{
-			Partition: partition,
-			FromLSN:   next,
-			Limit:     catalog.MaxSegmentPageLimit,
-		})
-		if err != nil {
-			return ConsumeResult{}, err
+		var segments []pmeta.SegmentRef
+		if segmentHintContains(hint, partition, next) {
+			segments = []pmeta.SegmentRef{*hint}
+		} else {
+			page, err := r.catalog.ListSegments(ctx, catalog.ListSegmentsRequest{
+				Partition: partition,
+				FromLSN:   next,
+				Limit:     catalog.MaxSegmentPageLimit,
+			})
+			if err != nil {
+				return ConsumeResult{}, nil, err
+			}
+			segments = page.Segments
+			if len(segments) == 0 {
+				return ConsumeResult{}, nil, fmt.Errorf("%w: no segment for partition=%d lsn=%d head_next=%d", ErrCorruptData, partition, next, head.NextLSN)
+			}
 		}
-		if len(page.Segments) == 0 {
-			return ConsumeResult{}, fmt.Errorf("%w: no segment for partition=%d lsn=%d head_next=%d", ErrCorruptData, partition, next, head.NextLSN)
-		}
+		// A hint is only a shortcut for the first matching segment. Once that
+		// segment is exhausted, the catalog resolves subsequent segments.
+		hint = nil
 
 		advanced := false
-		for _, segment := range page.Segments {
+		for _, segment := range segments {
 			if len(result.Records) >= limit || next >= head.NextLSN {
 				break
 			}
 			if segment.Partition != partition {
-				return ConsumeResult{}, fmt.Errorf("%w: segment partition=%d request partition=%d", ErrCorruptData, segment.Partition, partition)
+				return ConsumeResult{}, nil, fmt.Errorf("%w: segment partition=%d request partition=%d", ErrCorruptData, segment.Partition, partition)
 			}
 			if segment.LastLSN < next {
 				continue
 			}
 			if segment.BaseLSN > next {
-				return ConsumeResult{}, fmt.Errorf("%w: gap before segment base_lsn=%d next_lsn=%d", ErrCorruptData, segment.BaseLSN, next)
+				return ConsumeResult{}, nil, fmt.Errorf("%w: gap before segment base_lsn=%d next_lsn=%d", ErrCorruptData, segment.BaseLSN, next)
 			}
 
 			remaining := limit - len(result.Records)
-			records, err := r.readSegment(ctx, segment, next, remaining, head.NextLSN)
+			records, err := r.readSegment(ctx, segment, next, remaining, head.NextLSN, intent)
 			if err != nil {
-				return ConsumeResult{}, err
+				return ConsumeResult{}, nil, err
 			}
-			if len(records) == 0 {
-				return ConsumeResult{}, fmt.Errorf("%w: no records in segment uri=%s from_lsn=%d", ErrCorruptData, segment.URI, next)
+			next, err = appendSegmentBatch(&result, records, segment, next)
+			if err != nil {
+				return ConsumeResult{}, nil, err
 			}
-			result.Records = append(result.Records, records...)
-			next = result.Records[len(result.Records)-1].LSN + 1
-			result.NextLSN = next
 			advanced = true
+			if len(result.Records) >= limit || next >= head.NextLSN {
+				if next <= segment.LastLSN {
+					// Only immutable catalog metadata crosses calls. Object bytes
+					// remain in the shared LRU and are immediately evictable.
+					return result, newSegmentHint(segment), nil
+				}
+				return result, nil, nil
+			}
 		}
 		if !advanced {
-			return ConsumeResult{}, fmt.Errorf("%w: reader made no progress at lsn=%d", ErrCorruptData, next)
+			return ConsumeResult{}, nil, fmt.Errorf("%w: reader made no progress at lsn=%d", ErrCorruptData, next)
 		}
 	}
-	return result, nil
+	return result, nil, nil
+}
+
+func (r *Reader) consumeContinuousFromHead(ctx context.Context, head pmeta.PartitionHead, partition uint32, startLSN uint64, limit int, hint *pmeta.SegmentRef) (ConsumeResult, *pmeta.SegmentRef, error) {
+	result, nextHint, err := r.consumeFromHeadOnce(ctx, head, partition, startLSN, limit, readIntentContinuous, hint)
+	if err == nil {
+		return result, nextHint, nil
+	}
+	if errors.Is(err, ErrLSNExpired) {
+		return ConsumeResult{}, nil, err
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		// A segment hint contains no owned bytes, so retaining it after
+		// cancellation is safe and avoids another catalog lookup on retry.
+		return ConsumeResult{}, hint, err
+	}
+	fresh, retryErr := r.refreshAfterReadAnomaly(ctx, partition, startLSN, err)
+	if retryErr != nil {
+		return ConsumeResult{}, nil, retryErr
+	}
+	// Resolve the segment again after an anomaly. The old hint may refer to
+	// catalog state that the refresh just invalidated.
+	return r.consumeFromHeadOnce(ctx, fresh, partition, startLSN, limit, readIntentContinuous, nil)
+}
+
+func appendSegmentBatch(result *ConsumeResult, records []Record, segment pmeta.SegmentRef, fromLSN uint64) (uint64, error) {
+	if len(records) == 0 {
+		return fromLSN, fmt.Errorf("%w: no records in segment uri=%s from_lsn=%d", ErrCorruptData, segment.URI, fromLSN)
+	}
+	result.Records = append(result.Records, records...)
+	next := result.Records[len(result.Records)-1].LSN + 1
+	result.NextLSN = next
+	return next, nil
 }
 
 func (r *Reader) refreshAfterReadAnomaly(ctx context.Context, partition uint32, requested uint64, cause error) (pmeta.PartitionHead, error) {
@@ -435,7 +511,32 @@ func (r *Reader) findTimestampStart(ctx context.Context, segment pmeta.SegmentRe
 	return startLSN, ok, nil
 }
 
-func (r *Reader) readSegment(ctx context.Context, segment pmeta.SegmentRef, fromLSN uint64, limit int, headNextLSN uint64) ([]Record, error) {
+func (r *Reader) readSegment(ctx context.Context, segment pmeta.SegmentRef, fromLSN uint64, limit int, headNextLSN uint64, intent readIntent) ([]Record, error) {
+	var lease *wholeSegmentLease
+	defer func() {
+		if lease != nil {
+			lease.Release()
+		}
+	}()
+	return r.readSegmentWith(ctx, segment, fromLSN, limit, headNextLSN, func() (*segreader.Reader, error) {
+		var available bool
+		var err error
+		lease, available, err = r.openWholeSegmentForRead(ctx, segment, fromLSN, limit, intent)
+		if err != nil {
+			return nil, err
+		}
+		if available {
+			sr := lease.Reader()
+			if sr == nil {
+				return nil, ErrClosed
+			}
+			return sr, nil
+		}
+		return r.openSegment(ctx, segment)
+	})
+}
+
+func (r *Reader) readSegmentWith(ctx context.Context, segment pmeta.SegmentRef, fromLSN uint64, limit int, headNextLSN uint64, open func() (*segreader.Reader, error)) ([]Record, error) {
 	start := time.Now()
 	var out []Record
 	var err error
@@ -451,7 +552,7 @@ func (r *Reader) readSegment(ctx context.Context, segment pmeta.SegmentRef, from
 			Err:        err,
 		})
 	}()
-	sr, err := r.openSegment(ctx, segment)
+	sr, err := open()
 	if err != nil {
 		err = mapSegmentError(err)
 		return nil, err
@@ -484,6 +585,32 @@ func (r *Reader) openSegment(ctx context.Context, segment pmeta.SegmentRef) (*se
 	return segreader.Open(ctx, r.store, segment, r.opts.SegmentOptions)
 }
 
+func (r *Reader) openWholeSegmentForRead(ctx context.Context, segment pmeta.SegmentRef, fromLSN uint64, limit int, intent readIntent) (*wholeSegmentLease, bool, error) {
+	if chooseReadStrategy(r.opts, segment, fromLSN, limit, intent) != ReadWholeSegment {
+		if r.opts.ReadStrategy == ReadAuto {
+			// Any Auto read can use a compatible resident object at no remote-I/O
+			// cost. If it was evicted, AcquireCached returns unavailable and a narrow
+			// or point read uses ranges instead of downloading the object again.
+			return r.wholeSegments.AcquireCached(segment, r.opts.SegmentOptions)
+		}
+		return nil, false, nil
+	}
+	lease, available, err := r.wholeSegments.Acquire(ctx, r.wholeStore, segment, r.opts.SegmentOptions)
+	if err == nil && !available {
+		// Strategy and object-size checks have already passed. An unavailable
+		// lease therefore means active reads currently occupy the byte budget.
+		// The range fallback preserves progress and this metric makes it visible.
+		r.observe(MetricEvent{
+			Name:       MetricWholeReadFallback,
+			Partition:  segment.Partition,
+			StartLSN:   fromLSN,
+			Limit:      limit,
+			SegmentURI: segment.URI,
+		})
+	}
+	return lease, available, err
+}
+
 func normalizeOptions(opts Options) (Options, error) {
 	if opts.MaxRecordsPerBatch == 0 {
 		opts.MaxRecordsPerBatch = DefaultMaxRecordsPerBatch
@@ -496,6 +623,24 @@ func normalizeOptions(opts Options) (Options, error) {
 	}
 	if opts.MaxCachedPartitionHeads < 0 {
 		return Options{}, fmt.Errorf("%w: max_cached_partition_heads=%d", ErrInvalidOptions, opts.MaxCachedPartitionHeads)
+	}
+	if opts.ReadStrategy > ReadAuto {
+		return Options{}, fmt.Errorf("%w: read_strategy=%d", ErrInvalidOptions, opts.ReadStrategy)
+	}
+	if opts.MaxWholeSegmentBytes == 0 {
+		opts.MaxWholeSegmentBytes = DefaultMaxWholeSegmentBytes
+	}
+	if opts.WholeSegmentCacheBytes == 0 {
+		opts.WholeSegmentCacheBytes = DefaultWholeSegmentCacheBytes
+	}
+	if opts.ReadStrategy != ReadRanges && opts.MaxWholeSegmentBytes > opts.WholeSegmentCacheBytes {
+		return Options{}, fmt.Errorf("%w: max_whole_segment_bytes=%d exceeds whole_segment_cache_bytes=%d", ErrInvalidOptions, opts.MaxWholeSegmentBytes, opts.WholeSegmentCacheBytes)
+	}
+	if opts.WholeSegmentThresholdPercent == 0 {
+		opts.WholeSegmentThresholdPercent = DefaultWholeSegmentThresholdPercent
+	}
+	if opts.WholeSegmentThresholdPercent < 1 || opts.WholeSegmentThresholdPercent > 100 {
+		return Options{}, fmt.Errorf("%w: whole_segment_threshold_percent=%d", ErrInvalidOptions, opts.WholeSegmentThresholdPercent)
 	}
 	if opts.SegmentOptions == (segreader.Options{}) {
 		opts.SegmentOptions = segreader.DefaultOptions()

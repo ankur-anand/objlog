@@ -161,10 +161,12 @@ fence and ordered catalog session:
 result, err := writer.ApplyRetention(ctx)
 ```
 
-Records below `result.Snapshot.Head.OldestLSN` are no longer visible. Retention
-keeps a whole immutable segment when `BeforeLSN` falls inside it, so the
-effective `OldestLSN` can be lower than `result.RequestedLSN`. Physical object
-deletion is a separate grace-period GC operation.
+Once a reader observes `result.Snapshot.Head`, records below its `OldestLSN`
+are no longer visible through that reader. Passive cursors may continue using
+an older cached head until their reader refreshes it. Retention keeps a whole
+immutable segment when `BeforeLSN` falls inside it, so the effective
+`OldestLSN` can be lower than `result.RequestedLSN`. Physical object deletion is
+a separate grace-period GC operation.
 
 Provider stores expose an explicit reclaimer from
 `objlog/lifecycle`. Run retention cleanup regularly and the more
@@ -331,6 +333,57 @@ for {
 ```
 
 ## Reader Cache Options
+
+```go
+ReadStrategy: objlog.ReadAuto
+```
+
+`ReadAuto` uses one whole-object request when a one-shot sequential read covers
+at least the configured fraction of a segment. On a cache miss, exact-LSN
+fetches and narrow reads use block ranges; any Auto read can reuse a compatible
+whole object already resident in memory. The zero value, `ReadRanges`,
+preserves bounded range-based segment fetching. Cursor and Tailer values may
+still retain catalog metadata hints between calls. `ReadWholeSegment` prefers
+whole-object reads for eligible segments, with range fallback when the
+whole-object byte budget is currently occupied by active reads.
+
+For `Cursor` and `Tailer`, Auto applies the threshold to all records remaining
+in the segment rather than to one `Next` batch. A cursor near the beginning can
+therefore fetch the object once and reuse it from the shared LRU across smaller
+batches, while a cursor resumed near the end uses ranges. A single `Next` can
+continue into the following segment to fill its requested batch, as it does
+with range reads.
+
+Each `Next` consults the latest in-memory catalog head and temporarily pins its
+whole-cache entry only while that call is reading. The cursor retains a small
+immutable segment-reference hint to avoid repeated `ListSegments` calls under
+every read strategy. It does not retain object bytes, so an idle or abandoned
+cursor cannot prevent LRU eviction. A whole object normally needs one GET
+across sequential batches, but may be downloaded again if cache pressure
+evicts it between calls.
+
+A passive Cursor enforces retention against the newest successfully refreshed
+partition head known to its Reader. A retention change in the remote catalog
+may remain visible until that head refreshes. Reaching the cached tail,
+`PartitionReader.Head`, `Checkpoint`, `ResumeCursor`, or a Watch refresh can
+update it. Reader instances on different nodes refresh independently. Once the
+cached head advances, retention is applied consistently under every read
+strategy. Segment metadata is validated when the object opens, and each block
+is validated as it is decoded.
+
+```go
+MaxWholeSegmentBytes:          8 << 20
+WholeSegmentCacheBytes:        256 << 20
+WholeSegmentThresholdPercent: 50
+```
+
+These options bound one whole-object read, bound the aggregate complete-object
+cache, and control the broad-read threshold. Complete objects use a dedicated
+byte-bounded LRU with singleflight loading and never enter `RangeCacheBytes`.
+`MaxWholeSegmentBytes` must not exceed `WholeSegmentCacheBytes`. A segment above
+the per-object limit, or one that cannot fit while active reads temporarily pin
+all possible victims, falls back to range reads. A cache-budget fallback emits
+`reader.whole_read_fallback` so it is visible in production metrics.
 
 ```go
 RangeCacheBytes

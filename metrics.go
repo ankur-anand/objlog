@@ -21,13 +21,14 @@ const (
 	MetricWriterSegmentPublish  MetricName = "writer.segment_publish"
 	MetricWriterSegmentCleanup  MetricName = "writer.segment_cleanup"
 
-	MetricReaderHead           MetricName = "reader.head"
-	MetricReaderRead           MetricName = "reader.read"
-	MetricReaderFetch          MetricName = "reader.fetch"
-	MetricReaderTimestampRead  MetricName = "reader.timestamp_read"
-	MetricReaderTailNext       MetricName = "reader.tail_next"
-	MetricReaderCatalogRefresh MetricName = "reader.catalog_refresh"
-	MetricReaderSegmentRead    MetricName = "reader.segment_read"
+	MetricReaderHead              MetricName = "reader.head"
+	MetricReaderRead              MetricName = "reader.read"
+	MetricReaderFetch             MetricName = "reader.fetch"
+	MetricReaderTimestampRead     MetricName = "reader.timestamp_read"
+	MetricReaderTailNext          MetricName = "reader.tail_next"
+	MetricReaderCatalogRefresh    MetricName = "reader.catalog_refresh"
+	MetricReaderSegmentRead       MetricName = "reader.segment_read"
+	MetricReaderWholeReadFallback MetricName = "reader.whole_read_fallback"
 )
 
 // Metric is a generic event emitted by public reader/writer operations and by

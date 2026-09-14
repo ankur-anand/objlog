@@ -21,6 +21,7 @@ const (
 var (
 	ErrWatchClosed         = errors.New("objlog/reader: watch closed")
 	ErrPartitionNotWatched = errors.New("objlog/reader: partition not watched")
+	errTailerClosed        = fmt.Errorf("%w: tailer closed", ErrInvalidRequest)
 )
 
 // Partition returns a passive reader view for one partition.
@@ -97,6 +98,11 @@ func (p *PartitionReader) Head(ctx context.Context) (head pmeta.PartitionHead, e
 // the catalog according to req.Freshness, but it never starts background
 // polling and it never waits for future data.
 func (p *PartitionReader) Read(ctx context.Context, req ReadRequest) (result ReadResult, err error) {
+	result, _, err = p.read(ctx, req, nil, false)
+	return result, err
+}
+
+func (p *PartitionReader) read(ctx context.Context, req ReadRequest, hint *pmeta.SegmentRef, continuous bool) (result ReadResult, nextHint *pmeta.SegmentRef, err error) {
 	start := time.Now()
 	defer func() {
 		p.reader.observe(MetricEvent{
@@ -111,18 +117,25 @@ func (p *PartitionReader) Read(ctx context.Context, req ReadRequest) (result Rea
 		})
 	}()
 	if err := p.reader.checkOpen(); err != nil {
-		return ReadResult{}, err
+		return ReadResult{}, hint, err
 	}
+	// headForRead is an in-memory lookup while the requested LSN is behind the
+	// cached tail. Calling it for every batch keeps returned Head metadata and
+	// retention checks current without adding a catalog request per Next.
 	head, err := p.reader.refresh.headForRead(ctx, p.partition, req.StartLSN, req.Freshness)
 	if err != nil {
-		return ReadResult{}, err
+		return ReadResult{}, hint, err
 	}
-	result, err = p.reader.consumeWithHead(ctx, head, ConsumeRequest{
+	consume := ConsumeRequest{
 		Partition: p.partition,
 		StartLSN:  req.StartLSN,
 		Limit:     req.Limit,
-	})
-	return result, err
+	}
+	if continuous {
+		return p.reader.consumeContinuousWithHead(ctx, head, consume, hint)
+	}
+	result, err = p.reader.consumeWithHead(ctx, head, consume)
+	return result, nil, err
 }
 
 // Cursor returns a passive replay cursor over this partition.
@@ -184,15 +197,17 @@ func (p *PartitionReader) ResumeCursor(ctx context.Context, checkpoint CursorChe
 	}, nil
 }
 
-// Cursor is a passive stateful replay cursor. It is not safe for concurrent
-// use.
+// Cursor is a passive stateful replay cursor. Retention changes take effect
+// when its Reader observes an updated partition head. Cursor is not safe for
+// concurrent use.
 type Cursor struct {
-	partition *PartitionReader
-	streamID  string
-	bound     bool
-	nextLSN   uint64
-	limit     int
-	closed    bool
+	partition   *PartitionReader
+	streamID    string
+	bound       bool
+	nextLSN     uint64
+	limit       int
+	segmentHint *pmeta.SegmentRef
+	closed      bool
 }
 
 // Next reads from the current cursor position and advances only when records
@@ -201,17 +216,20 @@ func (c *Cursor) Next(ctx context.Context) (ReadResult, error) {
 	if c.closed {
 		return ReadResult{}, fmt.Errorf("%w: cursor closed", ErrInvalidRequest)
 	}
-	result, err := c.partition.Read(ctx, ReadRequest{
+	result, nextHint, err := c.partition.read(ctx, ReadRequest{
 		StartLSN:  c.nextLSN,
 		Limit:     c.limit,
 		Freshness: FreshnessOnTail,
-	})
+	}, c.segmentHint, true)
 	if err != nil {
+		c.segmentHint = nextHint
 		return ReadResult{}, err
 	}
 	if err := c.bind(result.Head); err != nil {
+		c.segmentHint = nil
 		return ReadResult{}, err
 	}
+	c.segmentHint = nextHint
 	if len(result.Records) > 0 {
 		c.nextLSN = result.NextLSN
 	}
@@ -229,9 +247,11 @@ func (c *Cursor) Checkpoint(ctx context.Context) (CursorCheckpoint, error) {
 		return CursorCheckpoint{}, err
 	}
 	if err := c.bind(head); err != nil {
+		c.segmentHint = nil
 		return CursorCheckpoint{}, err
 	}
 	if c.nextLSN < head.OldestLSN {
+		c.segmentHint = nil
 		return CursorCheckpoint{}, LSNExpiredError{
 			Requested: c.nextLSN,
 			Oldest:    head.OldestLSN,
@@ -239,6 +259,7 @@ func (c *Cursor) Checkpoint(ctx context.Context) (CursorCheckpoint, error) {
 		}
 	}
 	if c.nextLSN > head.NextLSN {
+		c.segmentHint = nil
 		return CursorCheckpoint{}, fmt.Errorf("%w: cursor next_lsn=%d head_next=%d", ErrCheckpointAhead, c.nextLSN, head.NextLSN)
 	}
 	return CursorCheckpoint{
@@ -252,6 +273,9 @@ func (c *Cursor) Checkpoint(ctx context.Context) (CursorCheckpoint, error) {
 // Seek moves the cursor to lsn.
 func (c *Cursor) Seek(lsn uint64) {
 	c.nextLSN = lsn
+	if !segmentHintContains(c.segmentHint, c.partition.partition, lsn) {
+		c.segmentHint = nil
+	}
 }
 
 // Position returns the next LSN the cursor will try to read.
@@ -262,17 +286,19 @@ func (c *Cursor) Position() uint64 {
 // Fork returns another cursor with the same position and limit.
 func (c *Cursor) Fork() *Cursor {
 	return &Cursor{
-		partition: c.partition,
-		streamID:  c.streamID,
-		bound:     c.bound,
-		nextLSN:   c.nextLSN,
-		limit:     c.limit,
+		partition:   c.partition,
+		streamID:    c.streamID,
+		bound:       c.bound,
+		nextLSN:     c.nextLSN,
+		limit:       c.limit,
+		segmentHint: cloneSegmentHint(c.segmentHint),
 	}
 }
 
 // Close marks the cursor closed. It does not close the shared Reader runtime.
 func (c *Cursor) Close() error {
 	c.closed = true
+	c.segmentHint = nil
 	return nil
 }
 
@@ -320,6 +346,8 @@ func (w *Watch) RemovePartition(partition uint32) {
 	}
 	delete(w.partitions, partition)
 	w.signalMembershipChangedLocked()
+	// Keep membership and the refresh subscription ordered with AddPartition;
+	// otherwise a concurrent re-add can be undone by a late unwatch.
 	w.reader.refresh.unwatchPartition(partition)
 }
 
@@ -361,6 +389,9 @@ func (w *Watch) Close() error {
 	}
 	w.partitions = nil
 	w.mu.Unlock()
+	// Every active Tailer.Next derives its operation context from w.ctx, so
+	// cancellation interrupts both catalog waits and object reads without a
+	// registry or waiting for a Tailer mutex.
 	w.cancel()
 	w.reader.unregisterWatch(w)
 	for _, partition := range partitions {
@@ -384,56 +415,110 @@ func (w *Watch) signalMembershipChangedLocked() {
 }
 
 // Tailer is a blocking cursor attached to an explicit Watch. It is not safe for
-// concurrent use.
+// concurrent Next calls. Position and Close may run while Next is active.
 type Tailer struct {
-	watch     *Watch
-	partition uint32
-	nextLSN   uint64
-	limit     int
-	closed    bool
+	mu           sync.Mutex
+	watch        *Watch
+	partition    uint32
+	nextLSN      uint64
+	limit        int
+	segmentHint  *pmeta.SegmentRef
+	activeID     uint64
+	activeCancel context.CancelCauseFunc
+	closed       bool
 }
 
 // Next returns available records immediately. If the tailer is at the
 // committed tail, it waits until the Watch observes the partition head advance
 // or ctx is cancelled.
 func (t *Tailer) Next(ctx context.Context) (result ReadResult, err error) {
-	start := time.Now()
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return ReadResult{}, errTailerClosed
+	}
+	if t.activeCancel != nil {
+		t.mu.Unlock()
+		return ReadResult{}, fmt.Errorf("%w: concurrent Tailer.Next", ErrInvalidRequest)
+	}
+	t.activeID++
+	operationID := t.activeID
+	operationCtx, cancel := context.WithCancelCause(ctx)
+	t.activeCancel = cancel
 	startLSN := t.nextLSN
+	hint := cloneSegmentHint(t.segmentHint)
+	limit := t.limit
+	t.mu.Unlock()
+
+	// Watch cancellation must interrupt a Tailer that is inside a store read,
+	// not only one waiting for the next catalog generation.
+	stopWatchCancellation := context.AfterFunc(t.watch.ctx, func() {
+		cancel(ErrWatchClosed)
+	})
+	start := time.Now()
 	defer func() {
+		stopWatchCancellation()
+		cancel(context.Canceled)
+		t.mu.Lock()
+		if t.activeID == operationID {
+			t.activeCancel = nil
+		}
+		t.mu.Unlock()
+		// User observers run after releasing Tailer state, so callbacks may call
+		// Position or Close without recursively deadlocking.
 		t.watch.reader.observe(MetricEvent{
 			Name:      MetricTailNext,
 			Partition: t.partition,
 			StartLSN:  startLSN,
 			NextLSN:   result.NextLSN,
-			Limit:     t.limit,
+			Limit:     limit,
 			Records:   len(result.Records),
 			Duration:  time.Since(start),
 			Err:       err,
 		})
 	}()
-	if t.closed {
-		return ReadResult{}, fmt.Errorf("%w: tailer closed", ErrInvalidRequest)
-	}
 	partition := t.watch.reader.Partition(t.partition)
 	for {
-		result, err := partition.Read(ctx, ReadRequest{
-			StartLSN:  t.nextLSN,
-			Limit:     t.limit,
+		result, nextHint, readErr := partition.read(operationCtx, ReadRequest{
+			StartLSN:  startLSN,
+			Limit:     limit,
 			Freshness: FreshnessOnTail,
-		})
-		if err != nil {
-			return ReadResult{}, err
+		}, hint, true)
+		if readErr != nil {
+			// The consume path can invalidate a catalog hint while refreshing after
+			// an anomaly. Preserve that decision even though the position does not
+			// advance, matching Cursor.Next and avoiding a stale retry on the next call.
+			t.mu.Lock()
+			if !t.closed && t.activeID == operationID {
+				t.segmentHint = cloneSegmentHint(nextHint)
+			}
+			t.mu.Unlock()
+			if operationCtx.Err() != nil {
+				return ReadResult{}, context.Cause(operationCtx)
+			}
+			return ReadResult{}, readErr
 		}
 		if len(result.Records) > 0 {
+			t.mu.Lock()
+			if t.closed {
+				t.mu.Unlock()
+				return ReadResult{}, errTailerClosed
+			}
 			t.nextLSN = result.NextLSN
+			t.segmentHint = nextHint
+			t.mu.Unlock()
 			return result, nil
 		}
+		hint = nextHint
 
 		head, generation, ok := t.watch.reader.refresh.snapshot(t.partition)
-		if ok && head.NextLSN > t.nextLSN {
+		if ok && head.NextLSN > startLSN {
 			continue
 		}
-		if err := t.watch.waitForAdvance(ctx, t.partition, generation); err != nil {
+		if err := t.watch.waitForAdvance(operationCtx, t.partition, generation); err != nil {
+			if operationCtx.Err() != nil {
+				return ReadResult{}, context.Cause(operationCtx)
+			}
 			return ReadResult{}, err
 		}
 	}
@@ -441,12 +526,25 @@ func (t *Tailer) Next(ctx context.Context) (result ReadResult, err error) {
 
 // Position returns the next LSN the tailer will try to read.
 func (t *Tailer) Position() uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	return t.nextLSN
 }
 
 // Close marks the tailer closed. It does not close the Watch.
 func (t *Tailer) Close() error {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return nil
+	}
 	t.closed = true
+	t.segmentHint = nil
+	cancel := t.activeCancel
+	t.mu.Unlock()
+	if cancel != nil {
+		cancel(errTailerClosed)
+	}
 	return nil
 }
 
